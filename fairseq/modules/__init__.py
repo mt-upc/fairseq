@@ -25,6 +25,8 @@ from .layer_norm import Fp32LayerNorm, LayerNorm
 from .learned_positional_embedding import LearnedPositionalEmbedding
 from .lightweight_convolution import LightweightConv, LightweightConv1dTBC
 from .linearized_convolution import LinearizedConvolution
+from .local_multihead_attention import LocalMultiheadAttention
+from .local_transformer_layer import LocalTransformerEncoderLayer
 from .location_attention import LocationAttention
 from .lstm_cell_with_zoneout import LSTMCellWithZoneOut
 from .multihead_attention import MultiheadAttention
