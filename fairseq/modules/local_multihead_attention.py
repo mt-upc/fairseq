@@ -1,7 +1,10 @@
 import torch
 import torch.nn as nn
 
-from local_attention import LocalAttention
+try:
+    from local_attention import LocalAttention
+except ImportError:
+    print("Please install the local-attention package")
 
 class LocalMultiheadAttention(nn.Module):
     """Local multi-headed attention.
