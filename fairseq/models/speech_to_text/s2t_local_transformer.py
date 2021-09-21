@@ -55,8 +55,8 @@ class Conv1dSubsampler(nn.Module):
 
     def get_out_seq_lens_tensor(self, in_seq_lens_tensor):
         out = in_seq_lens_tensor.clone()
-        for _ in range(self.n_layers):
-            out = ((out.float() - 1) / self.stride + 1).floor().long()
+        for s in self.strides:
+            out = ((out.float() - 1) / s + 1).floor().long()
         return out
 
     def forward(self, src_tokens, src_lengths):
