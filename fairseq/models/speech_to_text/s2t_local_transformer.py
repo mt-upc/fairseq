@@ -112,7 +112,7 @@ class S2TLocalTransformerModel(S2TTransformerModel):
 class S2TLocalTransformerEncoder(S2TTransformerEncoder):
     def __init__(self, args):
         super().__init__(args)
-        attention_windows = eval(args.attention_window)
+        attention_windows = eval(args.encoder_attention_window)
 
         if isinstance(attention_windows, int):
             attention_windows = [attention_windows] * args.encoder_layers
