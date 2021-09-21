@@ -66,10 +66,10 @@ class LocalMultiheadAttention(nn.Module):
 
         nn.init.constant_(self.wo.bias, 0.0)
 
-    def forward(self, query, key, value, input_mask):
+    def forward(self, query, key, value, key_padding_mask, **kwargs):
 
         # padding_positions=True -> padding_positions=False
-        input_mask = ~input_mask
+        input_mask = ~key_padding_mask
 
         # T x B x C -> B X T X C
         query = query.permute(1, 0, 2)
