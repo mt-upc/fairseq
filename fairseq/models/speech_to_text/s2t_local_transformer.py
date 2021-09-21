@@ -78,7 +78,7 @@ class S2TLocalTransformerModel(S2TTransformerModel):
 
     @staticmethod
     def add_args(parser):
-        super().add_args(parser)
+        S2TTransformerModel.add_args(parser)
         parser.add_argument(
             "--conv-strides",
             type=str,
