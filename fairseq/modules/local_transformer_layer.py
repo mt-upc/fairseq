@@ -5,8 +5,8 @@ from fairseq.modules.transformer_layer import TransformerEncoderLayerBase
 
 class LocalTransformerEncoderLayerBase(TransformerEncoderLayerBase):
     def __init__(self, cfg, attention_window):
-        super().__init__(cfg)
         self.attention_window = attention_window
+        super().__init__(cfg)
 
     def build_self_attention(self, embed_dim, cfg):
         return LocalMultiheadAttention(
