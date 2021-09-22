@@ -78,19 +78,17 @@ class LocalMultiheadAttention(nn.Module):
 
         query, key, value = self.wq(query), self.wk(key), self.wv(value)
 
-        # B x T x C -> num_heads * (B x T x head_dim)
-        query, key, value = (
-            x.chunk(self.num_heads, -1) for x in (query, key, value)
-        )
+        # B x T x C -> (B x num_heads) x T x head_dim)
+        query = torch.cat(query.chunk(self.num_heads, dim=-1), dim=0)
+        key = torch.cat(key.chunk(self.num_heads, dim=-1), dim=0)
+        value = torch.cat(value.chunk(self.num_heads, dim=-1), dim=0)
 
-        # num_heads * (B x T x head_dim) -> B x T x C
-        out = self.wo(
-            torch.cat(
-                [self.attention(q, k, v, input_mask)
-                 for q, k, v in zip(query, key, value)],
-                dim=-1,
-            )
-        )
+        out = self.attention(query, key, value, input_mask)
+
+        # (B * num_heads) x T x head_dim) -> B x T x C
+        out = torch.cat(out.chunk(self.num_heads, dim=0), dim=-1)
+
+        out = self.wo(out)
         
         # B x T x C -> T x B x C
         out = out.permute(1, 0, 2)
