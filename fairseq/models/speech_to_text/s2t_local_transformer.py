@@ -2,6 +2,7 @@ import logging
 from pathlib import Path
 from typing import List
 
+import torch
 import torch.nn as nn
 
 from fairseq import checkpoint_utils
@@ -132,6 +133,16 @@ class S2TLocalTransformerEncoder(S2TTransformerEncoder):
         self.transformer_layers = nn.ModuleList(
             [LocalTransformerEncoderLayer(args, w) for w in attention_windows]
         )
+        # Deactivate absolute positional encodings (local attention contains relative PE)
+        self.embed_positions = EmptyPositionalEmbeding(args.encoder_embed_dim)
+
+class EmptyPositionalEmbeding(nn.Module):
+    def __init__(self, embed_dim):
+        super().__init__()
+        self.embed_dim = embed_dim
+
+    def forward(self, input):
+        return torch.zeros(input.size(0), input.size(1), self.embed_dim).to(input.device)
 
 
 @register_model_architecture(model_name="s2t_local_transformer", arch_name="s2t_local_transformer")
