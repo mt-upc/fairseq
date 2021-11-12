@@ -7,7 +7,7 @@ export FAIRSEQ_ROOT=...      # where you'll clone our Fairseq fork
 
 Clone this Fairseq branch:
 ```bash
-git clone -b s2t-local https://github.com/mt-upc/fairseq.git ${FAIRSEQ_ROOT}
+git clone -b multiformer https://github.com/mt-upc/fairseq.git ${FAIRSEQ_ROOT}
 ```
 
 Create a conda environment using the environment.yml file and activate it:
