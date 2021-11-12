@@ -1,5 +1,5 @@
 from fairseq.models.transformer import TransformerConfig
-from fairseq.modules import LocalMultiheadAttention
+from fairseq.modules import MultiheadLocalAttention
 from fairseq.modules.transformer_layer import TransformerEncoderLayerBase
 
 
@@ -9,7 +9,7 @@ class LocalTransformerEncoderLayerBase(TransformerEncoderLayerBase):
         super().__init__(cfg)
 
     def build_self_attention(self, embed_dim, cfg):
-        return LocalMultiheadAttention(
+        return MultiheadLocalAttention(
             window_size=self.attention_window//2,
             causal=False,
             look_backward=1,

@@ -6,7 +6,7 @@ try:
 except ImportError:
     print("Please install the local-attention package")
 
-class LocalMultiheadAttention(nn.Module):
+class MultiheadLocalAttention(nn.Module):
     """Local multi-headed attention.
 
     Based on the implementation by @lucidrains:
@@ -26,7 +26,7 @@ class LocalMultiheadAttention(nn.Module):
         exact_windowsize=False,
         num_heads=None,
     ):
-        super(LocalMultiheadAttention, self).__init__()
+        super(MultiheadLocalAttention, self).__init__()
 
         assert (
             embed_dim % num_heads == 0
