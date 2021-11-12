@@ -1,0 +1,19 @@
+name: multiformer
+
+channels:
+- pytorch
+- conda-forge
+- defaults
+
+dependencies:
+- python=3.8
+- pip=21.3.1
+- pytorch=1.8
+- torchaudio=0.8
+- torchvision=0.9
+- cudatoolkit=10.2
+- sentencepiece=0.1.95
+- wandb=0.12.1
+
+- pip:
+    - local-attention==1.4.3

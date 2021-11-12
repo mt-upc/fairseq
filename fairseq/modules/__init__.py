@@ -25,7 +25,10 @@ from .layer_norm import Fp32LayerNorm, LayerNorm
 from .learned_positional_embedding import LearnedPositionalEmbedding
 from .lightweight_convolution import LightweightConv, LightweightConv1dTBC
 from .linearized_convolution import LinearizedConvolution
+from .full_attention import FullAttention
+from .conv_attention import ConvAttention
 from .multihead_localattention import MultiheadLocalAttention
+from .multihead_multiattention import MultiheadMultiAttention
 from .location_attention import LocationAttention
 from .lstm_cell_with_zoneout import LSTMCellWithZoneOut
 from .multihead_attention import MultiheadAttention
@@ -39,6 +42,7 @@ from .transpose_last import TransposeLast
 from .unfold import unfold1d
 from .transformer_layer import TransformerDecoderLayer, TransformerEncoderLayer
 from .local_transformer_layer import LocalTransformerEncoderLayer
+from .multi_transformer_layer import MultiformerEncoderLayer
 from .vggblock import VGGBlock
 
 __all__ = [
@@ -67,7 +71,10 @@ __all__ = [
     "LightweightConv1dTBC",
     "LightweightConv",
     "LinearizedConvolution",
+    "FullAttention",
+    "ConvAttention",
     "MultiheadLocalAttention",
+    "MultiheadMultiAttention",
     "LocationAttention",
     "LSTMCellWithZoneOut",
     "MultiheadAttention",
@@ -78,6 +85,7 @@ __all__ = [
     "TransformerSentenceEncoderLayer",
     "TransformerSentenceEncoder",
     "LocalTransformerEncoderLayer",
+    "MultiformerEncoderLayer",
     "TransformerDecoderLayer",
     "TransformerEncoderLayer",
     "TransposeLast",
