@@ -61,13 +61,14 @@ class Conv1dSubsampler(nn.Module):
         return out
 
     def forward(self, src_tokens, src_lengths):
-        bsz, in_seq_len, _ = src_tokens.size()  # B x T x (C x D)
-        x = src_tokens.transpose(1, 2).contiguous()  # -> B x (C x D) x T
+        # B x T x (C x D) -> B x (C x D) x T
+        x = src_tokens.transpose(1, 2).contiguous()
         for conv in self.conv_layers:
             x = conv(x)
             x = nn.functional.glu(x, dim=1)
-        _, _, out_seq_len = x.size()
-        x = x.transpose(1, 2).transpose(0, 1).contiguous()  # -> T x B x (C x D)
+
+        # B x (C x D) x T -> T x B x (C x D)
+        x = x.transpose(1, 2).transpose(0, 1).contiguous()
         return x, self.get_out_seq_lens_tensor(src_lengths)
 
 
