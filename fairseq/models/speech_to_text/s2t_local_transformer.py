@@ -124,13 +124,23 @@ class S2TLocalTransformerEncoder(S2TTransformerEncoder):
         else:
             raise TypeError("'attention_window' format unknown")
 
-        self.subsample = Conv1dSubsampler(
-            args.input_feat_per_channel * args.input_channels,
-            args.conv_channels,
-            args.encoder_embed_dim,
-            [int(k) for k in args.conv_kernel_sizes.split(",")],
-            [int(s) for s in args.conv_strides.split(",")],
-        )
+        conv_kernel_sizes = eval(args.conv_kernel_sizes) \
+            if args.conv_kernel_sizes != '' else ()
+        conv_strides = eval(args.conv_strides) \
+            if args.conv_strides != '' else ()
+        assert len(conv_kernel_sizes) == len(conv_strides)
+
+        if len(conv_kernel_sizes) > 0:
+            self.subsample = Conv1dSubsampler(
+                args.input_feat_per_channel * args.input_channels,
+                args.conv_channels,
+                args.encoder_embed_dim,
+                conv_kernel_sizes,
+                conv_strides,
+            )
+        else:
+            self.subsample = nn.Identity()
+
         self.transformer_layers = nn.ModuleList(
             [LocalTransformerEncoderLayer(args, w) for w in attention_windows]
         )
@@ -149,8 +159,9 @@ class EmptyPositionalEmbeding(nn.Module):
 @register_model_architecture(model_name="s2t_local_transformer", arch_name="s2t_local_transformer")
 def base_architecture(args):
     from fairseq.models.speech_to_text.s2t_transformer import base_architecture
+    args.conv_kernel_sizes = getattr(args, "conv_kernel_sizes", ",")
+    args.conv_strides = getattr(args, "conv_strides", ",")
     base_architecture(args)
-    args.conv_strides = getattr(args, "conv_strides", "2,2")
 
 
 @register_model_architecture("s2t_local_transformer", "s2t_local_transformer_s")
