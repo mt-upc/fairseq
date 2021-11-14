@@ -101,7 +101,7 @@ class S2TMultiformerModel(S2TTransformerModel):
         )
         parser.add_argument(
             "--local-att-ws",
-            type=tuple,
+            type=str,
             metavar="N",
             help="Local Attention window size of each group",
         )
@@ -113,13 +113,13 @@ class S2TMultiformerModel(S2TTransformerModel):
         )
         parser.add_argument(
             "--compressed-att-ks",
-            type=tuple,
+            type=str,
             metavar="N",
             help="Compressed Attention kernel size of each group",
         )
         parser.add_argument(
             "--compressed-att-cf",
-            type=tuple,
+            type=str,
             metavar="N",
             help="Compressed Attention compression factor of each group",
         )
