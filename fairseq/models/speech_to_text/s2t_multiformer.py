@@ -170,10 +170,10 @@ class S2TMultiformerEncoder(S2TTransformerEncoder):
         full_att_heads = args.full_att_heads
         local_att_cfg = self.build_local_att_cfg(args)
         compressed_att_cfg = self.build_compressed_att_cfg(args)
-        compressed_conv_type = args.compressed_att_conv_type
+        compressed_att_conv_type = args.compressed_att_conv_type
 
         self.transformer_layers = nn.ModuleList(
-            [MultiformerEncoderLayer(args, full_att_heads, local_att_cfg, compressed_att_cfg, compressed_conv_type) for _ in range(args.encoder_layers)]
+            [MultiformerEncoderLayer(args, full_att_heads, local_att_cfg, compressed_att_cfg, compressed_att_conv_type) for _ in range(args.encoder_layers)]
         )
 
     def build_local_att_cfg(self, args):
