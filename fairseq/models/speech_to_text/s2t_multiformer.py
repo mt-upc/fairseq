@@ -205,6 +205,7 @@ def base_architecture(args):
     args.compressed_att_cf = getattr(args, "compressed_att_cf", "4")
     args.compressed_att_conv_type = getattr(args, "compressed_att_conv_type", "depthwise")
     base_architecture(args)
+    delattr(args, 'encoder_attention_heads')
 
 
 @register_model_architecture("s2t_multiformer", "s2t_multiformer_s")
