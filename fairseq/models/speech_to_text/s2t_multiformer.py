@@ -169,7 +169,7 @@ class S2TMultiformerEncoder(S2TTransformerEncoder):
         full_att_heads = args.full_att_heads
         local_att_cfg = tuple(zip(local_att_nheads, local_att_ws))
         compressed_att_cfg = tuple(zip(compressed_att_nheads, compressed_att_ks, compressed_att_cf))
-        compressed_conv_type = args.compressed_conv_type
+        compressed_conv_type = args.compressed_att_conv_type
 
         if len(conv_kernel_sizes) > 0:
             self.subsample = Conv1dSubsampler(
