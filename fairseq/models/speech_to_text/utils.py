@@ -561,3 +561,19 @@ def attention_suppression(attention_weights: Tensor, scale: float):
 
 def layer_norm_backward_hook(module, grad_input, grad_output, clamp_value):
     return tuple(torch.clamp(v, min=-clamp_value, max=clamp_value) for v in grad_input)
+
+
+# ------------------------------------------------------------------------------
+#   parse_str2tuple
+# ------------------------------------------------------------------------------
+
+def parse_str2tuple(arg_str):
+    if arg_str == "":
+        return ()
+    else:
+        arg_val = eval(arg_str)
+
+    if isinstance(arg_val, int):
+        arg_val = (arg_val,)
+
+    return arg_val

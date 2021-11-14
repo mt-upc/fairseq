@@ -14,6 +14,7 @@ from fairseq.models.speech_to_text import (
     S2TTransformerModel,
     S2TTransformerEncoder,
 )
+from fairseq.models.speech_to_text.utils import parse_str2tuple
 from fairseq.modules import LocalTransformerEncoderLayer
 
 logger = logging.getLogger(__name__)
@@ -114,20 +115,15 @@ class S2TLocalTransformerModel(S2TTransformerModel):
 class S2TLocalTransformerEncoder(S2TTransformerEncoder):
     def __init__(self, args):
         super().__init__(args)
-        attention_windows = eval(args.encoder_attention_window)
-
-        if isinstance(attention_windows, int):
-            attention_windows = [attention_windows] * args.encoder_layers
-        elif isinstance(attention_windows, tuple):
-            attention_windows = list(attention_windows)
-            assert len(attention_windows) == args.encoder_layers
+        attention_windows = parse_str2tuple(args.encoder_attention_window)
+        
+        if len(attention_windows) == 1:
+            attention_windows = attention_windows * args.encoder_layers
         else:
-            raise TypeError("'attention_window' format unknown")
+            assert len(attention_windows) == args.encoder_layers
 
-        conv_kernel_sizes = eval(args.conv_kernel_sizes) \
-            if args.conv_kernel_sizes != '' else ()
-        conv_strides = eval(args.conv_strides) \
-            if args.conv_strides != '' else ()
+        conv_kernel_sizes = parse_str2tuple(args.conv_kernel_sizes)
+        conv_strides = parse_str2tuple(args.conv_strides)
         assert len(conv_kernel_sizes) == len(conv_strides)
 
         if len(conv_kernel_sizes) > 0:
@@ -159,8 +155,8 @@ class EmptyPositionalEmbeding(nn.Module):
 @register_model_architecture(model_name="s2t_local_transformer", arch_name="s2t_local_transformer")
 def base_architecture(args):
     from fairseq.models.speech_to_text.s2t_transformer import base_architecture
-    args.conv_kernel_sizes = getattr(args, "conv_kernel_sizes", ",")
-    args.conv_strides = getattr(args, "conv_strides", ",")
+    args.conv_kernel_sizes = getattr(args, "conv_kernel_sizes", "")
+    args.conv_strides = getattr(args, "conv_strides", "")
     base_architecture(args)
 
 

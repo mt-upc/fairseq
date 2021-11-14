@@ -38,9 +38,13 @@ class MultiheadMultiAttention(nn.Module):
         super(MultiheadMultiAttention, self).__init__()
 
         self.full_att_heads = full_att_heads
-        self.local_att_cfg = local_att_cfg
-        self.compressed_att_cfg = compressed_att_cfg
-
+        self.local_att_cfg = tuple(
+            [cfg_group for cfg_group in local_att_cfg if cfg_group[0] != 0]
+        )
+        self.compressed_att_cfg = tuple(
+            [cfg_group for cfg_group in compressed_att_cfg if cfg_group[0] != 0]
+        )
+        
         assert self.num_heads > 0, \
             "You must set at least one head"
 

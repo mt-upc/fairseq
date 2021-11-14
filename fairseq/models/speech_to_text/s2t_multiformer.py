@@ -14,6 +14,7 @@ from fairseq.models.speech_to_text import (
     S2TTransformerModel,
     S2TTransformerEncoder,
 )
+from fairseq.models.speech_to_text.utils import parse_str2tuple
 from fairseq.modules import MultiformerEncoderLayer
 
 logger = logging.getLogger(__name__)
@@ -151,26 +152,10 @@ class S2TMultiformerEncoder(S2TTransformerEncoder):
     def __init__(self, args):
         super().__init__(args)
 
-        conv_kernel_sizes = eval(args.conv_kernel_sizes) \
-            if args.conv_kernel_sizes != '' else ()
-        conv_strides = eval(args.conv_strides) \
-            if args.conv_strides != '' else ()
+        conv_kernel_sizes = parse_str2tuple(args.conv_kernel_sizes)
+        conv_strides = parse_str2tuple(args.conv_strides)
         assert len(conv_kernel_sizes) == len(conv_strides)
-
-        local_att_nheads = eval(args.local_att_nheads)
-        local_att_ws = eval(args.local_att_ws)
-        assert len(local_att_nheads) == len(local_att_ws)
-
-        compressed_att_nheads = eval(args.compressed_att_nheads)
-        compressed_att_ks = eval(args.compressed_att_ks)
-        compressed_att_cf = eval(args.compressed_att_cf)
-        assert len(compressed_att_nheads) == len(compressed_att_ks) == len(compressed_att_cf)
-
-        full_att_heads = args.full_att_heads
-        local_att_cfg = tuple(zip(local_att_nheads, local_att_ws))
-        compressed_att_cfg = tuple(zip(compressed_att_nheads, compressed_att_ks, compressed_att_cf))
-        compressed_conv_type = args.compressed_att_conv_type
-
+        
         if len(conv_kernel_sizes) > 0:
             self.subsample = Conv1dSubsampler(
                 args.input_feat_per_channel * args.input_channels,
@@ -182,22 +167,42 @@ class S2TMultiformerEncoder(S2TTransformerEncoder):
         else:
             self.subsample = nn.Identity()
 
+        full_att_heads = args.full_att_heads
+        local_att_cfg = self.build_local_att_cfg(args)
+        compressed_att_cfg = self.build_compressed_att_cfg(args)
+        compressed_conv_type = args.compressed_att_conv_type
+
         self.transformer_layers = nn.ModuleList(
             [MultiformerEncoderLayer(args, full_att_heads, local_att_cfg, compressed_att_cfg, compressed_conv_type) for _ in range(args.encoder_layers)]
         )
+
+    def build_local_att_cfg(self, args):
+        local_att_nheads = parse_str2tuple(args.local_att_nheads)
+        local_att_ws = parse_str2tuple(args.local_att_ws)
+        assert len(local_att_nheads) == len(local_att_ws)
+        local_att_cfg = tuple(zip(local_att_nheads, local_att_ws))
+        return local_att_cfg
+    
+    def build_compressed_att_cfg(self, args):
+        compressed_att_nheads = parse_str2tuple(args.compressed_att_nheads)
+        compressed_att_ks = parse_str2tuple(args.compressed_att_ks)
+        compressed_att_cf = parse_str2tuple(args.compressed_att_cf)
+        assert len(compressed_att_nheads) == len(compressed_att_ks) == len(compressed_att_cf)
+        compressed_att_cfg = tuple(zip(compressed_att_nheads, compressed_att_ks, compressed_att_cf))
+        return compressed_att_cfg
 
 
 @register_model_architecture(model_name="s2t_multiformer", arch_name="s2t_multiformer")
 def base_architecture(args):
     from fairseq.models.speech_to_text.s2t_transformer import base_architecture
-    args.conv_kernel_sizes = getattr(args, "conv_kernel_sizes", ",")
-    args.conv_strides = getattr(args, "conv_strides", ",")
+    args.conv_kernel_sizes = getattr(args, "conv_kernel_sizes", "")
+    args.conv_strides = getattr(args, "conv_strides", "")
     args.full_att_heads = getattr(args, "full_att_heads", 0)
-    args.local_att_nheads = getattr(args, "local_att_nheads", "4,")
-    args.local_att_ws = getattr(args, "local_att_ws", "64,")
-    args.compressed_att_nheads = getattr(args, "compressed_att_nheads", "4,")
-    args.compressed_att_ks = getattr(args, "compressed_att_ks", "9,")
-    args.compressed_att_cf = getattr(args, "compressed_att_cf", "4,")
+    args.local_att_nheads = getattr(args, "local_att_nheads", "4")
+    args.local_att_ws = getattr(args, "local_att_ws", "64")
+    args.compressed_att_nheads = getattr(args, "compressed_att_nheads", "4")
+    args.compressed_att_ks = getattr(args, "compressed_att_ks", "9")
+    args.compressed_att_cf = getattr(args, "compressed_att_cf", "4")
     args.compressed_att_conv_type = getattr(args, "compressed_att_conv_type", "depthwise")
     base_architecture(args)
 
@@ -205,8 +210,8 @@ def base_architecture(args):
 @register_model_architecture("s2t_multiformer", "s2t_multiformer_s")
 def s2t_local_transformer_s(args):
     from fairseq.models.speech_to_text.s2t_transformer import s2t_transformer_s
-    args.local_att_nheads = getattr(args, "local_att_nheads", "2,")
-    args.compressed_att_nheads = getattr(args, "compressed_att_nheads", "2,")
+    args.local_att_nheads = getattr(args, "local_att_nheads", "2")
+    args.compressed_att_nheads = getattr(args, "compressed_att_nheads", "2")
     s2t_transformer_s(args)
     base_architecture(args)
 
@@ -228,8 +233,8 @@ def s2t_local_transformer_sp(args):
 @register_model_architecture("s2t_multiformer", "s2t_multiformer_m")
 def s2t_local_transformer_m(args):
     from fairseq.models.speech_to_text.s2t_transformer import s2t_transformer_m
-    args.local_att_nheads = getattr(args, "local_att_nheads", "4,")
-    args.compressed_att_nheads = getattr(args, "compressed_att_nheads", "4,")
+    args.local_att_nheads = getattr(args, "local_att_nheads", "4")
+    args.compressed_att_nheads = getattr(args, "compressed_att_nheads", "4")
     s2t_transformer_m(args)
     base_architecture(args)
 
@@ -244,8 +249,8 @@ def s2t_local_transformer_mp(args):
 @register_model_architecture("s2t_multiformer", "s2t_multiformer_l")
 def s2t_local_transformer_l(args):
     from fairseq.models.speech_to_text.s2t_transformer import s2t_transformer_l
-    args.local_att_nheads = getattr(args, "local_att_nheads", "8,")
-    args.compressed_att_nheads = getattr(args, "compressed_att_nheads", "8,")
+    args.local_att_nheads = getattr(args, "local_att_nheads", "8")
+    args.compressed_att_nheads = getattr(args, "compressed_att_nheads", "8")
     s2t_transformer_l(args)
     base_architecture(args)
 
