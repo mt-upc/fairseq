@@ -72,7 +72,7 @@ class Conv1dSubsampler(nn.Module):
         return x, self.get_out_seq_lens_tensor(src_lengths)
 
 
-@register_model("multiformer")
+@register_model("s2t_multiformer")
 class S2TMultiformerModel(S2TTransformerModel):
 
     def __init__(self, encoder, decoder):
