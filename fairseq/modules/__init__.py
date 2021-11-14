@@ -42,7 +42,7 @@ from .transpose_last import TransposeLast
 from .unfold import unfold1d
 from .transformer_layer import TransformerDecoderLayer, TransformerEncoderLayer
 from .local_transformer_layer import LocalTransformerEncoderLayer
-from .multi_transformer_layer import MultiformerEncoderLayer
+from .multiformer_layer import MultiformerEncoderLayer
 from .vggblock import VGGBlock
 
 __all__ = [
