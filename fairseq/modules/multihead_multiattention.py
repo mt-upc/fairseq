@@ -26,6 +26,8 @@ class MultiheadMultiAttention(nn.Module):
     ):
         """ MultiheadMultiAttention
 
+        NOTE: This module currently only supports self-attention
+
         Attributes:
             embed_dim: Embedding dimension
             full_att_heads: Number of full attention heads 
@@ -125,9 +127,9 @@ class MultiheadMultiAttention(nn.Module):
         x = torch.cat(x, dim=-1)
         return x
 
-    def forward(self, q, k, v, mask_q=None, mask_kv=None):
+    def forward(self, query, key, value, key_padding_mask=None, **kwargs):
         # T x B x C -> B X T X C
-        q, k, v = map(lambda x: x.permute(1, 0, 2), (q, k, v))
+        q, k, v = map(lambda x: x.permute(1, 0, 2), (query, key, value))
         q, k, v = self.wq(q), self.wk(k), self.wv(v)
 
         # B x T x C -> [((B * H_1) x T x C_h), ..., (B * H_n) x T x C_h)]
@@ -135,14 +137,12 @@ class MultiheadMultiAttention(nn.Module):
 
         out = []
         for n_h, att, q_, k_, v_ in zip(self.num_heads_flat_list, self.attentions, q, k, v):
-            mask_q_ = mask_q.tile(n_h, 1) if mask_q is not None else None
-            mask_kv_ = mask_kv.tile(n_h, 1) if mask_kv is not None else None
+            mask_ = key_padding_mask.tile(n_h, 1) \
+                if key_padding_mask is not None else None
             if isinstance(att, LocalAttention):
-                assert mask_kv is not None, \
-                    "Local Attention can only be used for self-attention"
-                out.append(att(q_, k_, v_, ~mask_q_))
+                out.append(att(q_, k_, v_, ~mask_))
             else:
-                out.append(att(q_, k_, v_, mask_q_, mask_kv_))
+                out.append(att(q_, k_, v_, mask_, mask_))
 
         # [((B * H_1) x T x C_h), ..., (B * H_n) x T x C_h)] ->  B x T x C
         out = self.concat_heads(out)
