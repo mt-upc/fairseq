@@ -209,7 +209,7 @@ def base_architecture(args):
 
 
 @register_model_architecture("s2t_multiformer", "s2t_multiformer_s")
-def s2t_local_transformer_s(args):
+def s2t_multiformer_s(args):
     from fairseq.models.speech_to_text.s2t_transformer import s2t_transformer_s
     args.local_att_nheads = getattr(args, "local_att_nheads", "2")
     args.compressed_att_nheads = getattr(args, "compressed_att_nheads", "2")
@@ -218,21 +218,21 @@ def s2t_local_transformer_s(args):
 
 
 @register_model_architecture("s2t_multiformer", "s2t_multiformer_xs")
-def s2t_local_transformer_xs(args):
+def s2t_multiformer_xs(args):
     from fairseq.models.speech_to_text.s2t_transformer import s2t_transformer_xs
     s2t_transformer_xs(args)
-    s2t_local_transformer_s(args)
+    s2t_multiformer_s(args)
 
 
 @register_model_architecture("s2t_multiformer", "s2t_multiformer_sp")
-def s2t_local_transformer_sp(args):
+def s2t_multiformer_sp(args):
     from fairseq.models.speech_to_text.s2t_transformer import s2t_transformer_sp
     s2t_transformer_sp(args)
-    s2t_local_transformer_s(args)
+    s2t_multiformer_s(args)
 
 
 @register_model_architecture("s2t_multiformer", "s2t_multiformer_m")
-def s2t_local_transformer_m(args):
+def s2t_multiformer_m(args):
     from fairseq.models.speech_to_text.s2t_transformer import s2t_transformer_m
     args.local_att_nheads = getattr(args, "local_att_nheads", "4")
     args.compressed_att_nheads = getattr(args, "compressed_att_nheads", "4")
@@ -241,14 +241,14 @@ def s2t_local_transformer_m(args):
 
 
 @register_model_architecture("s2t_multiformer", "s2t_multiformer_mp")
-def s2t_local_transformer_mp(args):
+def s2t_multiformer_mp(args):
     from fairseq.models.speech_to_text.s2t_transformer import s2t_transformer_mp
     s2t_transformer_mp(args)
-    s2t_local_transformer_m(args)
+    s2t_multiformer_m(args)
 
 
 @register_model_architecture("s2t_multiformer", "s2t_multiformer_l")
-def s2t_local_transformer_l(args):
+def s2t_multiformer_l(args):
     from fairseq.models.speech_to_text.s2t_transformer import s2t_transformer_l
     args.local_att_nheads = getattr(args, "local_att_nheads", "8")
     args.compressed_att_nheads = getattr(args, "compressed_att_nheads", "8")
@@ -257,7 +257,7 @@ def s2t_local_transformer_l(args):
 
 
 @register_model_architecture("s2t_multiformer", "s2t_multiformer_lp")
-def s2t_local_transformer_lp(args):
+def s2t_multiformer_lp(args):
     from fairseq.models.speech_to_text.s2t_transformer import s2t_transformer_lp
     s2t_transformer_lp(args)
-    s2t_local_transformer_l(args)
+    s2t_multiformer_l(args)
