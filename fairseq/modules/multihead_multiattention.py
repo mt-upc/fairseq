@@ -151,4 +151,7 @@ class MultiheadMultiAttention(nn.Module):
         # B x T x C -> T x B x C
         out = out.permute(1, 0, 2)
 
-        return out
+        # compatible with the MultiheadAttention class
+        attn_weights = None
+
+        return out, attn_weights
