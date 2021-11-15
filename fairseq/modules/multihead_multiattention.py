@@ -21,7 +21,7 @@ class MultiheadMultiAttention(nn.Module):
         full_att_heads: int = 0,
         local_att_cfg: Tuple[Tuple[int]] = ((0,1),),
         compressed_att_cfg: Tuple[Tuple[int]] = ((0,1,1),),
-        compressed_conv_type: str = 'normal',
+        compressed_att_conv_type: str = 'normal',
         dropout: float = 0.,
     ):
         """ MultiheadMultiAttention
@@ -33,7 +33,7 @@ class MultiheadMultiAttention(nn.Module):
             full_att_heads: Number of full attention heads 
             local_att_cfg: Local Attention config ((n_heads, window_size), ...)
             compressed_att_cfg: Compressed Attention config ((n_heads, kernel_size, comp_factor), ...)
-            compressed_conv_type: Convolutions type ('normal', 'separable' or 'depthwise')
+            compressed_att_conv_type: Convolutions type ('normal', 'separable' or 'depthwise')
             dropout: Dropout probability
 
         """
@@ -80,7 +80,7 @@ class MultiheadMultiAttention(nn.Module):
                     dim=self.head_dim,
                     kernel_size=k_s,
                     stride=comp_f,
-                    conv_type=compressed_conv_type,
+                    conv_type=compressed_att_conv_type,
                     dropout=dropout,
                 )
             )
