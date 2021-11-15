@@ -28,7 +28,7 @@ class ConvAttention(nn.Module):
             nn.Conv1d(
                 in_channels=self.dim,
                 out_channels=self.dim,
-                groups=(1 if self.conv_type != 'normal' else self.dim),
+                groups=(1 if self.conv_type == 'normal' else self.dim),
                 kernel_size=self.kernel_size,
                 stride=self.stride,
                 padding=self.stride//2,
