@@ -155,7 +155,7 @@ class S2TMultiformerEncoder(S2TTransformerEncoder):
         conv_kernel_sizes = parse_str2tuple(args.conv_kernel_sizes)
         conv_strides = parse_str2tuple(args.conv_strides)
         assert len(conv_kernel_sizes) == len(conv_strides)
-        
+
         if len(conv_kernel_sizes) > 0:
             self.subsample = Conv1dSubsampler(
                 args.input_feat_per_channel * args.input_channels,
@@ -215,6 +215,31 @@ def s2t_multiformer_s(args):
     args.compressed_att_nheads = getattr(args, "compressed_att_nheads", "2")
     s2t_transformer_s(args)
     base_architecture(args)
+
+
+@register_model_architecture("s2t_multiformer", "s2t_multiformer_s_4x")
+def s2t_multiformer_s_4x(args):
+    from fairseq.models.speech_to_text.s2t_transformer import s2t_transformer_s
+    args.local_att_nheads = getattr(args, "local_att_nheads", "2")
+    args.compressed_att_nheads = getattr(args, "compressed_att_nheads", "2")
+    args.conv_kernel_sizes = getattr(args, "conv_kernel_sizes", "5,5")
+    args.conv_strides = getattr(args, "conv_strides", "2,2")
+    s2t_transformer_s(args)
+    base_architecture(args)
+
+
+@register_model_architecture("s2t_multiformer", "s2t_multiformer_s_local")
+def s2t_multiformer_s_local(args):
+    args.local_att_nheads = getattr(args, "local_att_nheads", "4")
+    args.compressed_att_nheads = getattr(args, "compressed_att_nheads", "0")
+    s2t_multiformer_s(args)
+
+
+@register_model_architecture("s2t_multiformer", "s2t_multiformer_s_comp")
+def s2t_multiformer_s_comp(args):
+    args.local_att_nheads = getattr(args, "local_att_nheads", "0")
+    args.compressed_att_nheads = getattr(args, "compressed_att_nheads", "4")
+    s2t_multiformer_s(args)
 
 
 @register_model_architecture("s2t_multiformer", "s2t_multiformer_xs")
