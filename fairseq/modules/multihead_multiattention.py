@@ -141,9 +141,7 @@ class MultiheadMultiAttention(nn.Module):
                 if key_padding_mask is not None else None
             if isinstance(att, LocalAttention):
                 out.append(att(q_, k_, v_, ~mask_))
-            elif isinstance(att, FullAttention):
-                out.append(att(q_, k_, v_, mask_, mask_))
-            elif isinstance(att, ConvAttention):
+            else:
                 out.append(att(q_, k_, v_, mask_, mask_))
 
         # [((B * H_1) x T x C_h), ..., (B * H_n) x T x C_h)] ->  B x T x C
