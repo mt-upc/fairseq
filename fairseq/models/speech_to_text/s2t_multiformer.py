@@ -95,6 +95,12 @@ class S2TMultiformerModel(S2TTransformerModel):
             help="Number of full attention heads",
         )
         parser.add_argument(
+            "--fast-attention-heads",
+            type=int,
+            metavar="N",
+            help="Number of fast attention heads",
+        )
+        parser.add_argument(
             "--local-att-nheads",
             type=str,
             metavar="N",
@@ -168,12 +174,13 @@ class S2TMultiformerEncoder(S2TTransformerEncoder):
             self.subsample = nn.Identity()
 
         full_att_heads = args.full_att_heads
+        fast_att_heads = args.fast_att_heads
         local_att_cfg = self.build_local_att_cfg(args)
         compressed_att_cfg = self.build_compressed_att_cfg(args)
         compressed_att_conv_type = args.compressed_att_conv_type
 
         self.transformer_layers = nn.ModuleList(
-            [MultiformerEncoderLayer(args, full_att_heads, local_att_cfg, compressed_att_cfg, compressed_att_conv_type) for _ in range(args.encoder_layers)]
+            [MultiformerEncoderLayer(args, full_att_heads, fast_att_heads, local_att_cfg, compressed_att_cfg, compressed_att_conv_type) for _ in range(args.encoder_layers)]
         )
 
     def build_local_att_cfg(self, args):
@@ -198,6 +205,7 @@ def base_architecture(args):
     args.conv_kernel_sizes = getattr(args, "conv_kernel_sizes", "")
     args.conv_strides = getattr(args, "conv_strides", "")
     args.full_att_heads = getattr(args, "full_att_heads", 0)
+    args.fast_att_heads = getattr(args, "fast_att_heads", 0)
     args.local_att_nheads = getattr(args, "local_att_nheads", "4")
     args.local_att_ws = getattr(args, "local_att_ws", "64")
     args.compressed_att_nheads = getattr(args, "compressed_att_nheads", "4")

@@ -13,12 +13,19 @@ try:
 except ImportError:
     print("Please install the local-attention package")
 
+try:
+    from performer_pytorch import FastAttention
+except ImportError:
+    print("Please install the performer_pytorch package")
+
+
 
 class MultiheadMultiAttention(nn.Module):
     def __init__(
         self,
         embed_dim: int,
         full_att_heads: int = 0,
+        fast_att_heads: int = 0,
         local_att_cfg: Tuple[Tuple[int]] = ((0,1),),
         compressed_att_cfg: Tuple[Tuple[int]] = ((0,1,1),),
         compressed_att_conv_type: str = 'normal',
@@ -30,7 +37,8 @@ class MultiheadMultiAttention(nn.Module):
 
         Attributes:
             embed_dim: Embedding dimension
-            full_att_heads: Number of full attention heads 
+            full_att_heads: Number of full attention heads
+            fast_att_heads: Number of fast attention heads
             local_att_cfg: Local Attention config ((n_heads, window_size), ...)
             compressed_att_cfg: Compressed Attention config ((n_heads, kernel_size, comp_factor), ...)
             compressed_att_conv_type: Convolutions type ('normal', 'separable' or 'depthwise')
@@ -40,6 +48,7 @@ class MultiheadMultiAttention(nn.Module):
         super(MultiheadMultiAttention, self).__init__()
 
         self.full_att_heads = full_att_heads
+        self.fast_att_heads = fast_att_heads
         self.local_att_cfg = tuple(
             [cfg_group for cfg_group in local_att_cfg if cfg_group[0] != 0]
         )
@@ -59,6 +68,9 @@ class MultiheadMultiAttention(nn.Module):
 
         if full_att_heads > 0:
             self.attentions.append(FullAttention(dropout))
+
+        if fast_att_heads > 0:
+            self.attentions.append(FastAttention(self.head_dim))
 
         for (_, w_s) in self.local_att_cfg:
             self.attentions.append(
@@ -94,6 +106,7 @@ class MultiheadMultiAttention(nn.Module):
     def num_heads_list(self):
         return [
             self.full_att_heads,
+            self.fast_att_heads,
             [cfg[0] for cfg in self.local_att_cfg],
             [cfg[0] for cfg in self.compressed_att_cfg],
         ]
@@ -101,16 +114,18 @@ class MultiheadMultiAttention(nn.Module):
     @property
     def num_heads_flat_list(self):
         num_heads_flat_list = [self.num_heads_list[0],
-                               *self.num_heads_list[1],
-                               *self.num_heads_list[2]]
+                               self.num_heads_list[1],
+                               *self.num_heads_list[2],
+                               *self.num_heads_list[3]]
         num_heads_flat_list = [i for i in num_heads_flat_list if i != 0]
         return num_heads_flat_list
 
     @property    
     def num_heads(self):
         return self.num_heads_list[0] + \
-               sum(self.num_heads_list[1]) + \
-               sum(self.num_heads_list[2])
+               self.num_heads_list[1] + \
+               sum(self.num_heads_list[2]) + \
+               sum(self.num_heads_list[3])
 
     def split_heads(self, x: torch.FloatTensor):
         # B x T x C -> H * (B x T x C_h)
@@ -141,6 +156,9 @@ class MultiheadMultiAttention(nn.Module):
                 if key_padding_mask is not None else None
             if isinstance(att, LocalAttention):
                 out.append(att(q_, k_, v_, ~mask_))
+            elif isinstance(att, FastAttention):
+                q_, k_, v_ = map(lambda x: x.unsqueeze(1), (q_, k_, v_))
+                out.append(att(q_, k_, v_).squeeze(1))
             else:
                 out.append(att(q_, k_, v_, mask_, mask_))
 
