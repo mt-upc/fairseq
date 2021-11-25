@@ -76,10 +76,10 @@ class MultiheadMultiAttention(nn.Module):
             self.attentions.append(
                 LocalAttention(
                     dim=self.head_dim,
-                    window_size=w_s//2,
+                    window_size=1,
                     causal=False,
-                    look_backward=1,
-                    look_forward=0,
+                    look_backward=w_s//2,
+                    look_forward=w_s//2,
                     dropout=dropout,
                     autopad=True,
                 )
