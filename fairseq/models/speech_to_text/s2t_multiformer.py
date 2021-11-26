@@ -83,58 +83,22 @@ class S2TMultiformerModel(S2TTransformerModel):
     def add_args(parser):
         S2TTransformerModel.add_args(parser)
         parser.add_argument(
+            "--conv-ks",
+            type=str,
+            metavar="N",
+            help="kernel sizes of Conv1d subsampling layers",
+        )
+        parser.add_argument(
             "--conv-strides",
             type=str,
             metavar="N",
             help="strides of Conv1d subsampling layers",
         )
         parser.add_argument(
-            "--full-attention-heads",
-            type=int,
-            metavar="N",
-            help="Number of full attention heads",
-        )
-        parser.add_argument(
-            "--fast-attention-heads",
-            type=int,
-            metavar="N",
-            help="Number of fast attention heads",
-        )
-        parser.add_argument(
-            "--local-att-nheads",
+            "--arg-supremo",
             type=str,
             metavar="N",
-            help="Local Attention number of heads of each group",
-        )
-        parser.add_argument(
-            "--local-att-ws",
-            type=str,
-            metavar="N",
-            help="Local Attention window size of each group",
-        )
-        parser.add_argument(
-            "--compressed-att-nheads",
-            type=str,
-            metavar="N",
-            help="Compressed Attention number of heads of each group",
-        )
-        parser.add_argument(
-            "--compressed-att-ks",
-            type=str,
-            metavar="N",
-            help="Compressed Attention kernel size of each group",
-        )
-        parser.add_argument(
-            "--compressed-att-cf",
-            type=str,
-            metavar="N",
-            help="Compressed Attention compression factor of each group",
-        )
-        parser.add_argument(
-            "--compressed-att-conv-type",
-            type=str,
-            metavar="N",
-            help="Convolutions type ('normal', 'separable' or 'depthwise')",
+            help="Multiformer encoder layers configuration",
         )
 
     @classmethod
@@ -158,7 +122,7 @@ class S2TMultiformerEncoder(S2TTransformerEncoder):
     def __init__(self, args):
         super().__init__(args)
 
-        conv_kernel_sizes = parse_str2tuple(args.conv_kernel_sizes)
+        conv_kernel_sizes = parse_str2tuple(args.conv_ks)
         conv_strides = parse_str2tuple(args.conv_strides)
         assert len(conv_kernel_sizes) == len(conv_strides)
 
@@ -171,47 +135,65 @@ class S2TMultiformerEncoder(S2TTransformerEncoder):
                 conv_strides,
             )
         else:
-            self.subsample = nn.Identity()
+            self.subsample = Identity2D()
 
-        full_att_heads = args.full_att_heads
-        fast_att_heads = args.fast_att_heads
-        local_att_cfg = self.build_local_att_cfg(args)
-        compressed_att_cfg = self.build_compressed_att_cfg(args)
-        compressed_att_conv_type = args.compressed_att_conv_type
+        arg_supremo = eval(args.arg_supremo)
+        layer_configs = []
+        for layer_config in arg_supremo:
+            layer = {}
+            layer['full_att_heads'] = self.build_config_full(layer_config)
+            layer['fast_att_heads'] = self.build_config_fast(layer_config)
+            layer['local_att_cfg'] = self.build_config_local(layer_config)
+            layer['compressed_att_cfg'] = self.build_config_compressed(layer_config)
+            layer_configs.append(layer)
 
         self.transformer_layers = nn.ModuleList(
-            [MultiformerEncoderLayer(args, full_att_heads, fast_att_heads, local_att_cfg, compressed_att_cfg, compressed_att_conv_type) for _ in range(args.encoder_layers)]
+            [MultiformerEncoderLayer(args, config['full_att_heads'], config['fast_att_heads'], config['local_att_cfg'], config['compressed_att_cfg']) for config in layer_configs]
         )
 
-    def build_local_att_cfg(self, args):
-        local_att_nheads = parse_str2tuple(args.local_att_nheads)
-        local_att_ws = parse_str2tuple(args.local_att_ws)
-        assert len(local_att_nheads) == len(local_att_ws)
-        local_att_cfg = tuple(zip(local_att_nheads, local_att_ws))
-        return local_att_cfg
-    
-    def build_compressed_att_cfg(self, args):
-        compressed_att_nheads = parse_str2tuple(args.compressed_att_nheads)
-        compressed_att_ks = parse_str2tuple(args.compressed_att_ks)
-        compressed_att_cf = parse_str2tuple(args.compressed_att_cf)
-        assert len(compressed_att_nheads) == len(compressed_att_ks) == len(compressed_att_cf)
-        compressed_att_cfg = tuple(zip(compressed_att_nheads, compressed_att_ks, compressed_att_cf))
-        return compressed_att_cfg
+
+    def build_config_full(self, layer_config):
+        for group in layer_config:
+            if 'full' in group:
+                return group[1]
+        return 0
+
+    def build_config_fast(self, layer_config):
+        for group in layer_config:
+            if 'fast' in group:
+                return group[1]
+        return 0
+
+    def build_config_local(self, layer_config):
+        local_heads_config = []
+        for group in layer_config:
+            if 'local' in group:
+                local_heads_config.append((group[1], group[2]))
+        return tuple(local_heads_config)
+
+    def build_config_compressed(self, layer_config):
+        compressed_heads_config = []
+        for group in layer_config:
+            if 'compressed' in group:
+                compressed_heads_config.append((group[1], group[2], group[3], group[4]))
+        return tuple(compressed_heads_config)
+
+
+class Identity2D(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, src_tokens, src_lengths):
+        src_tokens = src_tokens.transpose(0, 1).contiguous()
+        return src_tokens, src_lengths
 
 
 @register_model_architecture(model_name="s2t_multiformer", arch_name="s2t_multiformer")
 def base_architecture(args):
     from fairseq.models.speech_to_text.s2t_transformer import base_architecture
-    args.conv_kernel_sizes = getattr(args, "conv_kernel_sizes", "")
+    args.conv_ks = getattr(args, "conv_ks", "")
     args.conv_strides = getattr(args, "conv_strides", "")
-    args.full_att_heads = getattr(args, "full_att_heads", 0)
-    args.fast_att_heads = getattr(args, "fast_att_heads", 0)
-    args.local_att_nheads = getattr(args, "local_att_nheads", "4")
-    args.local_att_ws = getattr(args, "local_att_ws", "64")
-    args.compressed_att_nheads = getattr(args, "compressed_att_nheads", "4")
-    args.compressed_att_ks = getattr(args, "compressed_att_ks", "9")
-    args.compressed_att_cf = getattr(args, "compressed_att_cf", "4")
-    args.compressed_att_conv_type = getattr(args, "compressed_att_conv_type", "depthwise")
+    args.arg_supremo = getattr(args, "arg_supremo", "8 * ((('full', 2), ('fast', 2), ('local', 1, 64), ('local', 1, 128), ('compressed', 2, 9, 5, 'depthwise')),) + 4 * ((('fast', 4), ('com', 4, 64)),)")
     base_architecture(args)
     delattr(args, 'encoder_attention_heads')
 
@@ -219,8 +201,9 @@ def base_architecture(args):
 @register_model_architecture("s2t_multiformer", "s2t_multiformer_s")
 def s2t_multiformer_s(args):
     from fairseq.models.speech_to_text.s2t_transformer import s2t_transformer_s
-    args.local_att_nheads = getattr(args, "local_att_nheads", "2")
-    args.compressed_att_nheads = getattr(args, "compressed_att_nheads", "2")
+    args.conv_ks = getattr(args, "conv_ks", "5,5")
+    args.conv_strides = getattr(args, "conv_strides", "1,1")
+    args.arg_supremo = getattr(args, "arg_supremo", "12 * ((('local', 2, 64), ('compressed', 2, 9, 4, 'depthwise')),)")
     s2t_transformer_s(args)
     base_architecture(args)
 
@@ -228,69 +211,18 @@ def s2t_multiformer_s(args):
 @register_model_architecture("s2t_multiformer", "s2t_multiformer_s_4x")
 def s2t_multiformer_s_4x(args):
     from fairseq.models.speech_to_text.s2t_transformer import s2t_transformer_s
-    args.local_att_nheads = getattr(args, "local_att_nheads", "2")
-    args.compressed_att_nheads = getattr(args, "compressed_att_nheads", "2")
-    args.conv_kernel_sizes = getattr(args, "conv_kernel_sizes", "5,5")
+    args.conv_ks = getattr(args, "conv_ks", "5,5")
     args.conv_strides = getattr(args, "conv_strides", "2,2")
+    args.arg_supremo = getattr(args, "arg_supremo", "12 * ((('local', 2, 64), ('compressed', 2, 9, 4, 'depthwise')),)")
     s2t_transformer_s(args)
     base_architecture(args)
 
 
-@register_model_architecture("s2t_multiformer", "s2t_multiformer_s_local")
-def s2t_multiformer_s_local(args):
-    args.local_att_nheads = getattr(args, "local_att_nheads", "4")
-    args.compressed_att_nheads = getattr(args, "compressed_att_nheads", "0")
-    s2t_multiformer_s(args)
-
-
-@register_model_architecture("s2t_multiformer", "s2t_multiformer_s_comp")
-def s2t_multiformer_s_comp(args):
-    args.local_att_nheads = getattr(args, "local_att_nheads", "0")
-    args.compressed_att_nheads = getattr(args, "compressed_att_nheads", "4")
-    s2t_multiformer_s(args)
-
-
-@register_model_architecture("s2t_multiformer", "s2t_multiformer_xs")
-def s2t_multiformer_xs(args):
-    from fairseq.models.speech_to_text.s2t_transformer import s2t_transformer_xs
-    s2t_transformer_xs(args)
-    s2t_multiformer_s(args)
-
-
-@register_model_architecture("s2t_multiformer", "s2t_multiformer_sp")
-def s2t_multiformer_sp(args):
-    from fairseq.models.speech_to_text.s2t_transformer import s2t_transformer_sp
-    s2t_transformer_sp(args)
-    s2t_multiformer_s(args)
-
-
-@register_model_architecture("s2t_multiformer", "s2t_multiformer_m")
-def s2t_multiformer_m(args):
-    from fairseq.models.speech_to_text.s2t_transformer import s2t_transformer_m
-    args.local_att_nheads = getattr(args, "local_att_nheads", "4")
-    args.compressed_att_nheads = getattr(args, "compressed_att_nheads", "4")
-    s2t_transformer_m(args)
+@register_model_architecture("s2t_multiformer", "s2t_progressive_multiformer_s_4x")
+def s2t_progressive_multiformer_s_4x(args):
+    from fairseq.models.speech_to_text.s2t_transformer import s2t_transformer_s
+    args.conv_ks = getattr(args, "conv_ks", "5,5")
+    args.conv_strides = getattr(args, "conv_strides", "2,2")
+    args.arg_supremo = getattr(args, "arg_supremo", "5 * ((('local', 2, 64), ('compressed', 2, 9, 4, 'depthwise')),) + 5 * ((('local', 2, 128), ('compressed', 2, 7, 3, 'depthwise')),) + 2 * ((('fast', 2),('local', 1, 254), ('compressed', 1, 5, 2, 'depthwise')),)")
+    s2t_transformer_s(args)
     base_architecture(args)
-
-
-@register_model_architecture("s2t_multiformer", "s2t_multiformer_mp")
-def s2t_multiformer_mp(args):
-    from fairseq.models.speech_to_text.s2t_transformer import s2t_transformer_mp
-    s2t_transformer_mp(args)
-    s2t_multiformer_m(args)
-
-
-@register_model_architecture("s2t_multiformer", "s2t_multiformer_l")
-def s2t_multiformer_l(args):
-    from fairseq.models.speech_to_text.s2t_transformer import s2t_transformer_l
-    args.local_att_nheads = getattr(args, "local_att_nheads", "8")
-    args.compressed_att_nheads = getattr(args, "compressed_att_nheads", "8")
-    s2t_transformer_l(args)
-    base_architecture(args)
-
-
-@register_model_architecture("s2t_multiformer", "s2t_multiformer_lp")
-def s2t_multiformer_lp(args):
-    from fairseq.models.speech_to_text.s2t_transformer import s2t_transformer_lp
-    s2t_transformer_lp(args)
-    s2t_multiformer_l(args)

@@ -28,7 +28,7 @@ class MultiheadMultiAttention(nn.Module):
         fast_att_heads: int = 0,
         local_att_cfg: Tuple[Tuple[int]] = ((0,1),),
         compressed_att_cfg: Tuple[Tuple[int]] = ((0,1,1),),
-        compressed_att_conv_type: str = 'normal',
+        compressed_att_conv_type: Tuple[str] = ('normal',),
         dropout: float = 0.,
     ):
         """ MultiheadMultiAttention
@@ -39,9 +39,8 @@ class MultiheadMultiAttention(nn.Module):
             embed_dim: Embedding dimension
             full_att_heads: Number of full attention heads
             fast_att_heads: Number of fast attention heads
-            local_att_cfg: Local Attention config ((n_heads, window_size), ...)
+            local_att_cfg: Local Attention config ((n_heads, window_size, type), ...)
             compressed_att_cfg: Compressed Attention config ((n_heads, kernel_size, comp_factor), ...)
-            compressed_att_conv_type: Convolutions type ('normal', 'separable' or 'depthwise')
             dropout: Dropout probability
 
         """
@@ -76,23 +75,23 @@ class MultiheadMultiAttention(nn.Module):
             self.attentions.append(
                 LocalAttention(
                     dim=self.head_dim,
-                    window_size=1,
+                    window_size=w_s//3,
                     causal=False,
-                    look_backward=w_s//2,
-                    look_forward=w_s//2,
+                    look_backward=1,
+                    look_forward=1,
                     dropout=dropout,
                     autopad=True,
                 )
             )
             self.attentions[-1].rel_pos = None
 
-        for (_, k_s, comp_f) in self.compressed_att_cfg:
+        for (_, k_s, comp_f, conv_type) in self.compressed_att_cfg:
             self.attentions.append(
                 ConvAttention(
                     dim=self.head_dim,
                     kernel_size=k_s,
                     stride=comp_f,
-                    conv_type=compressed_att_conv_type,
+                    conv_type=conv_type,
                     dropout=dropout,
                 )
             )
