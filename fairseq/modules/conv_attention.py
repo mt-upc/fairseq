@@ -60,7 +60,7 @@ class ConvAttention(nn.Module):
         return out_length
 
     def compute_conv_out_length(self, in_lengths):
-        out_lengths = (in_lengths + 2 * self.stride//2  - self.kernel_size) \
+        out_lengths = (in_lengths + 2 * (self.stride//2)  - self.kernel_size) \
                         / self.stride + 1
         return out_lengths.floor().int()
 
