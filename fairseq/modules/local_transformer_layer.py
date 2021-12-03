@@ -10,10 +10,10 @@ class LocalTransformerEncoderLayerBase(TransformerEncoderLayerBase):
 
     def build_self_attention(self, embed_dim, cfg):
         return MultiheadLocalAttention(
-            window_size=self.attention_window//2,
+            window_size=self.attention_window//3,
             causal=False,
             look_backward=1,
-            look_forward=0,
+            look_forward=1,
             dropout=cfg.attention_dropout,
             embed_dim=embed_dim,
             autopad=True,
