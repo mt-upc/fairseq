@@ -198,8 +198,8 @@ def base_architecture(args):
     delattr(args, 'encoder_attention_heads')
 
 
-@register_model_architecture("s2t_multiformer", "s2t_multiformer_s")
-def s2t_multiformer_s(args):
+@register_model_architecture("s2t_multiformer", "s2t_multiformer_s_h")
+def s2t_multiformer_s_h(args):
     from fairseq.models.speech_to_text.s2t_transformer import s2t_transformer_s
     args.conv_ks = getattr(args, "conv_ks", "5,5")
     args.conv_strides = getattr(args, "conv_strides", "1,1")
@@ -208,12 +208,32 @@ def s2t_multiformer_s(args):
     base_architecture(args)
 
 
-@register_model_architecture("s2t_multiformer", "s2t_multiformer_s_4x")
-def s2t_multiformer_s_4x(args):
+@register_model_architecture("s2t_multiformer", "s2t_multiformer_s_h_4x")
+def s2t_multiformer_s_h_4x(args):
     from fairseq.models.speech_to_text.s2t_transformer import s2t_transformer_s
     args.conv_ks = getattr(args, "conv_ks", "5,5")
     args.conv_strides = getattr(args, "conv_strides", "2,2")
-    args.arg_supremo = getattr(args, "arg_supremo", "12 * ((('local', 2, 64), ('compressed', 2, 9, 4, 'depthwise')),)")
+    args.arg_supremo = getattr(args, "arg_supremo", "12 * ((('local', 2, 64), ('compressed', 2, 5, 2, 'depthwise')),)")
+    s2t_transformer_s(args)
+    base_architecture(args)
+
+
+@register_model_architecture("s2t_multiformer", "s2t_multiformer_s_l_lc_4x")
+def s2t_multiformer_s_l_lc_4x(args):
+    from fairseq.models.speech_to_text.s2t_transformer import s2t_transformer_s
+    args.conv_ks = getattr(args, "conv_ks", "5,5")
+    args.conv_strides = getattr(args, "conv_strides", "2,2")
+    args.arg_supremo = getattr(args, "arg_supremo", "6 * ((('local', 4, 64),),) + 6 * ((('compressed', 4, 5, 2, 'depthwise'),),)")
+    s2t_transformer_s(args)
+    base_architecture(args)
+
+
+@register_model_architecture("s2t_multiformer", "s2t_multiformer_s_l_cl_4x")
+def s2t_multiformer_s_l_cl_4x(args):
+    from fairseq.models.speech_to_text.s2t_transformer import s2t_transformer_s
+    args.conv_ks = getattr(args, "conv_ks", "5,5")
+    args.conv_strides = getattr(args, "conv_strides", "2,2")
+    args.arg_supremo = getattr(args, "arg_supremo", "6 * ((('compressed', 4, 5, 2, 'depthwise'),),) + 6 * ((('local', 4, 64),),)")
     s2t_transformer_s(args)
     base_architecture(args)
 
