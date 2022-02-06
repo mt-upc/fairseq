@@ -99,7 +99,7 @@ def extract_fbank_features(
 
 
 def create_zip(data_root: Path, zip_path: Path):
-    paths = list(data_root.glob("*.npy"))
+    paths = list(data_root.glob("*.npy")) + list(data_root.glob("*.flac"))
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_STORED) as f:
         for path in tqdm(paths):
             f.write(path, arcname=path.name)
@@ -242,8 +242,11 @@ def load_tsv_to_dicts(path: Union[str, Path]) -> List[dict]:
 
 
 def filter_manifest_df(
-    df, is_train_split=False, extra_filters=None, min_n_frames=5, max_n_frames=3000
+    df, is_train_split=False, extra_filters=None, min_n_frames=5, max_n_frames=3000, is_audio=False
 ):
+    if is_audio:
+        min_n_frames *= 160
+        max_n_frames *= 160
     filters = {
         "no speech": df["audio"] == "",
         f"short speech (<{min_n_frames} frames)": df["n_frames"] < min_n_frames,
