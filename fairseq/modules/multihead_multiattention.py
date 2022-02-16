@@ -159,7 +159,7 @@ class MultiheadMultiAttention(nn.Module):
                 q_, k_, v_ = map(lambda x: x.unsqueeze(1), (q_, k_, v_))
                 out.append(att(q_, k_, v_).squeeze(1))
             else:
-                out.append(att(q_, k_, v_, mask_, mask_))
+                out.append(att(q_, k_, v_, mask_))
 
         # [((B * H_1) x T x C_h), ..., (B * H_n) x T x C_h)] ->  B x T x C
         out = self.concat_heads(out)

@@ -100,15 +100,14 @@ class ConvAttention(nn.Module):
             out_padding_mask = self.pad_mask(out_padding_mask, tgt_length)
         return out_padding_mask
 
-    def forward(self, query, key, value, mask_q=None, mask_kv=None):
+    def forward(self, query, key, value, key_padding_mask=None):
         """ Computes the ConvAttention
 
         Args:
-            query (torch.FloatTensor):  Query Tensor (B x T_q x d_q)
-            key (torch.FloatTensor):  Key Tensor (B x T_k x d_k)
-            value (torch.FloatTensor):  Value Tensor (B x T_v x d_v)
-            mask_q (torch.BoolTensor): Attention mask of queries (B x T_q)
-            mask_kv (torch.BoolTensor): Attention mask of keys (B x T_k)
+            query (torch.FloatTensor):  Query Tensor                      (... x T_q x d_q)
+            key (torch.FloatTensor):  Key Tensor                          (... x T_k x d_k)
+            value (torch.FloatTensor):  Value Tensor                      (... x T_v x d_v)
+            key_padding_mask (torch.BoolTensor): Attention mask of keys   (... x T_k)
 
         Returns:
             torch.FloatTensor: Result of the Global Attention (B x T_q x d_v)
@@ -117,8 +116,8 @@ class ConvAttention(nn.Module):
         key = self.conv_compression(key, self.conv_k)
         value = self.conv_compression(value, self.conv_v)
 
-        mask_kv = self.get_out_padding_mask(mask_kv, tgt_length=key.size(1))
+        key_padding_mask = self.get_out_padding_mask(key_padding_mask, tgt_length=key.size(1))
 
-        out = self.attention(query, key, value, mask_q, mask_kv)
+        out = self.attention(query, key, value, key_padding_mask)
 
         return out
