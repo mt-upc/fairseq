@@ -232,3 +232,22 @@ def s2t_multiformer_s_v5(args):
     args.arg_supremo = getattr(args, "arg_supremo", "4 * ((('compressed', 4, 5, 2, 'depthwise'),),) + 3 * ((('local', 1, 64), ('compressed', 3, 5, 2, 'depthwise')),) + 5 * ((('local', 2, 64), ('compressed', 2, 5, 2, 'depthwise')),)")
     s2t_transformer_s(args)
     base_architecture(args)
+
+@register_model_architecture("s2t_multiformer", "s2t_multiformer_local_no_ds")
+def s2t_multiformer_local_no_ds(args):
+    from fairseq.models.speech_to_text.s2t_transformer import s2t_transformer_s
+    args.conv_ks = getattr(args, "conv_ks", "1")
+    args.conv_strides = getattr(args, "conv_strides", "1")
+    args.arg_supremo = getattr(args, "arg_supremo", "6*((('local', 4, 64),),) + 6*((('local', 4, 128),),)")
+    s2t_transformer_s(args)
+    base_architecture(args)
+
+@register_model_architecture("s2t_multiformer", "s2t_multiformer_local_ds")
+def s2t_multiformer_local_ds(args):
+    from fairseq.models.speech_to_text.s2t_transformer import s2t_transformer_s
+    args.conv_ks = getattr(args, "conv_ks", "5,5")
+    args.conv_strides = getattr(args, "conv_strides", "2,2")
+    args.arg_supremo = getattr(args, "arg_supremo", "6*((('local', 4, 64),),) + 6*((('local', 4, 128),),)")
+    s2t_transformer_s(args)
+    base_architecture(args)
+
