@@ -171,9 +171,6 @@ class SpeechToTextTask(FairseqTask):
         return self.cfg.max_source_positions, self.cfg.max_target_positions
 
     def build_model(self, cfg, from_checkpoint=False):
-        cfg.input_feat_per_channel = self.data_cfg.input_feat_per_channel
-        cfg.input_channels = self.data_cfg.input_channels
-        cfg.speaker_to_id = self.speaker_to_id
         model = super(SpeechToTextTask, self).build_model(cfg, from_checkpoint)
         self.sequence_generator = self.build_generator(
             [model],
