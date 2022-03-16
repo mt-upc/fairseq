@@ -115,8 +115,7 @@ class S2TPretrainedModel(FairseqEncoderDecoderModel):
             else:
                 raise ValueError('Could not find args in checkpoint')
 
-            encoder_cls = S2TPretrainedEncoder.get_class(cfg)
-            encoder = encoder_cls.build(cfg)
+            encoder = S2TPretrainedEncoder.get_class(cfg).build(cfg)
             encoder.load_state_dict(state['model'])
         else:
             pass
@@ -134,8 +133,7 @@ class S2TPretrainedModel(FairseqEncoderDecoderModel):
             else:
                 raise ValueError('Could not find args in checkpoint')
 
-            decoder_cls = S2TPretrainedDecoder.get_class(cfg)
-            decoder = decoder_cls.build(cfg, tgt_dict)
+            decoder = S2TPretrainedDecoder.get_class(cfg).build(cfg, tgt_dict)
             decoder.load_state_dict(state['model'])
         else:
             pass
