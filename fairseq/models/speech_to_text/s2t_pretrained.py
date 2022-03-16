@@ -182,7 +182,8 @@ class S2TPretrainedEncoder(FairseqEncoder):
 
     def post_forward(self, encoder_out):
         if safe_hasattr(self, "coupling_layers"):
-            encoder_out["encoder_out"] = self.coupling_layers(encoder_out["encoder_out"])
+            for i, eo in enumerate(encoder_out["encoder_out"]):
+                encoder_out["encoder_out"][i] = self.coupling_layers(eo)
         return encoder_out
 
     def add_coupling_layers(self, cfg: FairseqDataclass):
