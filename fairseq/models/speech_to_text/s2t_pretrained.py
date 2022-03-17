@@ -61,6 +61,10 @@ class S2TPretrainedComponentConfig(FairseqDataclass):
         default=None,
         metadata={"help": "path to pretrained component"}
     )
+    no_load_weights: bool = field(
+        default=False,
+        metadata={"help": "don't load weights from pretrained component"},
+    )
     pre_args: Any = None # Store the args once the training has started
     data: str = II("task.data")
 
@@ -139,7 +143,11 @@ class S2TPretrainedComponent:
             raise ValueError("Invalid config type")
 
         if training:
-            component.load_state_dict(state['model'])
+            if cfg.no_load_weights:
+                logger.info(f"Not loading weights from pretrained {component_type}")
+            else:
+                logger.info(f"Loading weights from pretrained {component_type}")
+                component.load_state_dict(state['model'])
 
         return component
 
