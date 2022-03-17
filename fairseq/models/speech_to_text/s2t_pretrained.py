@@ -1,8 +1,8 @@
 import re
 import logging
-from typing import Any, Optional
 from dataclasses import dataclass, field
-from omegaconf import II, MISSING, DictConfig
+from omegaconf import II, DictConfig
+from typing import Any, Optional, Dict, Type
 
 import torch
 import torch.nn as nn
@@ -39,7 +39,7 @@ from fairseq.tasks import FairseqTask
 from fairseq.tasks.audio_pretraining import AudioPretrainingConfig
 from fairseq.tasks.hubert_pretraining import HubertPretrainingConfig
 from fairseq.tasks.speech_to_text import SpeechToTextTask
-from fairseq.utils import safe_getattr, safe_hasattr
+from fairseq.utils import safe_hasattr
 
 
 logger = logging.getLogger(__name__)
@@ -56,12 +56,17 @@ class S2TCouplingLayersConfig(FairseqDataclass):
 
 
 @dataclass
-class S2TPretrainedEncoderConfig(FairseqDataclass):
-    path: str = field(
-        default=MISSING, metadata={"help": "path to pretrained encoder"}
+class S2TPretrainedComponentConfig(FairseqDataclass):
+    path: Optional[str] = field(
+        default=None,
+        metadata={"help": "path to pretrained component"}
     )
-    args: Any = None # Store the args once the training has started
+    pre_args: Any = None # Store the args once the training has started
+    data: str = II("task.data")
 
+
+@dataclass
+class S2TPretrainedEncoderConfig(S2TPretrainedComponentConfig):
     coupling: Optional[S2TCouplingLayersConfig] = field(
         default=None,
         metadata={"help": "apply coupling layers to the encoder output"},
@@ -69,24 +74,20 @@ class S2TPretrainedEncoderConfig(FairseqDataclass):
 
 
 @dataclass
-class S2TPretrainedDecoderConfig(FairseqDataclass):
-    path: str = field(
-        default=MISSING, metadata={"help": "path to pretrained decoder"}
-    )
-    args: Any = None # Store the args once the training has started
+class S2TPretrainedDecoderConfig(S2TPretrainedComponentConfig):
+    pass
 
 
 @dataclass
 class S2TPretrainedConfig(FairseqDataclass):
     encoder: S2TPretrainedEncoderConfig = field(
-        default_factory=lambda: S2TPretrainedEncoderConfig(),
+        default_factory=lambda: S2TPretrainedEncoderConfig('encoder'),
         metadata={"help": "encoder configuration"},
     )
     decoder: S2TPretrainedDecoderConfig = field(
-        default_factory=lambda: S2TPretrainedDecoderConfig(),
+        default_factory=lambda: S2TPretrainedDecoderConfig('decoder'),
         metadata={"help": "decoder configuration"},
     )
-    data: str = II("task.data")
     
 
 @register_model("s2t_pretrained", dataclass=S2TPretrainedConfig)
@@ -97,59 +98,62 @@ class S2TPretrainedModel(FairseqEncoderDecoderModel):
         super().__init__(encoder, decoder)
 
     @classmethod
-    def build_model(cls, cfg: S2TPretrainedConfig, task: SpeechToTextTask):
-        encoder = cls.build_encoder(cfg)
-        if safe_hasattr(cfg.encoder, "coupling"):
-            encoder.add_coupling_layers(cfg.encoder.coupling)
-        decoder = cls.build_decoder(cfg, tgt_dict=task.target_dictionary)
-        return S2TPretrainedModel(encoder, decoder)
+    def build_model(cls, cfg: S2TPretrainedConfig, task: SpeechToTextTask) -> "S2TPretrainedModel":
+        encoder = S2TPretrainedComponent.build(cfg.encoder)
+        decoder = S2TPretrainedComponent.build(cfg.decoder, task.target_dictionary)
+        return cls(encoder, decoder)
+
+
+class S2TPretrainedComponent:
+    """ Base class for pretrained S2T encoders and decoders. """
+    
+    def __init__(self, cfg: S2TPretrainedComponentConfig):
+        self.cfg_ = cfg
+
+    @staticmethod
+    def load_args(cfg: S2TPretrainedComponentConfig, state: Dict) -> None:
+        if state.get("cfg", None) is not None:
+            cfg.pre_args = state['cfg']
+        elif state.get("args", None) is not None:
+            cfg.pre_args = convert_namespace_to_omegaconf(state["args"])
+        else:
+            raise ValueError('Could not find args in checkpoint')
 
     @classmethod
-    def build_encoder(cls, cfg: S2TPretrainedConfig):
-        if safe_getattr(cfg.encoder, 'args') is None:
-            state = load_checkpoint_to_cpu(cfg.encoder.path)
-            if state.get("cfg", None) is not None:
-                cfg.encoder.args = state['cfg']
-            elif state.get("args", None) is not None:
-                cfg.encoder.args = convert_namespace_to_omegaconf(state["args"])
-            else:
-                raise ValueError('Could not find args in checkpoint')
+    def build(cls, cfg: S2TPretrainedComponentConfig, dictionary: Dictionary = None) -> Type['S2TPretrainedComponent']:
+        training = not safe_hasattr(cfg, 'pre_args')
+        component_type = cfg._name
 
-            encoder = S2TPretrainedEncoder.get_class(cfg).build(cfg)
-            encoder.load_state_dict(state['model'])
+        if training:
+            logger.info(f"Building {component_type} from: {cfg.path}")
+            state = load_checkpoint_to_cpu(cfg.path)
+            S2TPretrainedComponent.load_args(cfg, state)
+
+        if component_type == 'encoder':
+            component = S2TPretrainedEncoder.get_class(cfg).build(cfg)
+            if safe_hasattr(cfg, "coupling") and not safe_hasattr(component, "coupling_layers"):
+                component.add_coupling_layers(cfg.coupling)
+        elif component_type == 'decoder':
+            component = S2TPretrainedDecoder.get_class(cfg).build(cfg, dictionary)
         else:
-            pass
+            raise ValueError("Invalid config type")
 
-        return encoder
+        if training:
+            component.load_state_dict(state['model'])
 
-    @classmethod
-    def build_decoder(cls, cfg: S2TPretrainedConfig, tgt_dict: Dictionary):
-        if safe_getattr(cfg.decoder, "args") is None:
-            state = load_checkpoint_to_cpu(cfg.decoder.path)
-            if state.get("cfg", None) is not None:
-                cfg.decoder.args = state['cfg']
-            elif state.get("args", None) is not None:
-                cfg.decoder.args = convert_namespace_to_omegaconf(state["args"])
-            else:
-                raise ValueError('Could not find args in checkpoint')
-
-            decoder = S2TPretrainedDecoder.get_class(cfg).build(cfg, tgt_dict)
-            decoder.load_state_dict(state['model'])
-        else:
-            pass
-
-        return decoder
+        return component
 
 
-class S2TPretrainedEncoder(FairseqEncoder):
+class S2TPretrainedEncoder(FairseqEncoder, S2TPretrainedComponent):
     """ Base class for pretrained S2T encoders """
 
-    def __init__(self):
+    def __init__(self, cfg: S2TPretrainedEncoderConfig):
         FairseqEncoder.__init__(self, dictionary=None)
+        S2TPretrainedComponent.__init__(self, cfg)
 
     @classmethod
-    def get_class(cls, cfg: S2TPretrainedConfig):
-        name = cfg.encoder.args.model._name
+    def get_class(cls, cfg: S2TPretrainedEncoderConfig) -> Type['S2TPretrainedEncoder']:
+        name = cfg.pre_args.model._name
         if name.startswith('wav2vec'):
             return PretrainedWav2VecEncoder
         elif name.startswith('hubert'):
@@ -158,13 +162,8 @@ class S2TPretrainedEncoder(FairseqEncoder):
             raise ValueError(f"Unknown encoder name: {name}")
 
     @classmethod
-    def pre_build(cls, cfg: S2TPretrainedConfig) -> None:
-        pass
-
-    @classmethod
-    def build(cls, cfg: S2TPretrainedConfig):
-        cls.pre_build(cfg)
-        return cls(cfg.encoder.args.model)
+    def build(cls, cfg: S2TPretrainedEncoderConfig) -> 'S2TPretrainedEncoder':
+        return cls(cfg)
 
     def pre_forward(self, src_tokens, src_lengths, **kwargs):
         return {
@@ -184,35 +183,42 @@ class S2TPretrainedEncoder(FairseqEncoder):
                 encoder_out["encoder_out"][i] = self.coupling_layers(eo)
         return encoder_out
 
-    def add_coupling_layers(self, cfg: FairseqDataclass):
+    def add_coupling_layers(self, cfg: S2TCouplingLayersConfig) -> None:
         self.coupling_layers = nn.Linear(cfg.in_dim, cfg.out_dim)
+
+    def load_state_dict(self, state_dict, strict=True):
+        # Trick to avoid errors when coupling layers are not present in state_dict
+        for n, p in self.named_parameters():
+            if n.startswith('coupling_layers') and n not in state_dict.keys():
+                state_dict[n] = p.data
+        super().load_state_dict(state_dict, strict=strict)
 
 
 class PretrainedWav2VecBaseEncoder(S2TPretrainedEncoder):
     """ Base class for pretrained wav2vec(-ish) encoders, including HuBERT """
 
-    def __init__(self, cfg: FairseqDataclass):
-        S2TPretrainedEncoder.__init__(self)
+    def __init__(self, cfg: S2TPretrainedEncoderConfig):
+        super().__init__(cfg)
 
     @classmethod
-    def pre_build(cls, cfg: S2TPretrainedEncoder):
-        if cfg.encoder.args.model._name == cls.PRETRAIN_MODEL_NAME:
+    def build(cls, cfg: S2TPretrainedEncoderConfig) -> 'PretrainedWav2VecBaseEncoder':
+        if cfg.pre_args.model._name == cls.PRETRAIN_MODEL_NAME:
             model_args = DictConfig(
                 cls.FINETUNE_MODEL_CFG(cls.FINETUNE_MODEL_NAME)
             )
-        elif cfg.encoder.args.model._name == cls.FINETUNE_MODEL_NAME:
+        elif cfg.pre_args.model._name == cls.FINETUNE_MODEL_NAME:
             model_args = merge_with_parent(
                 cls.FINETUNE_MODEL_CFG,
-                cfg.encoder.args.model,
+                cfg.pre_args.model,
                 remove_missing=True
             )
         else:
             raise ValueError(
-                f"Unknown model name: {cfg.encoder.args.model._name}"
+                f"Unknown model name: {cfg.pre_args.model._name}"
             )
 
         if not safe_hasattr(model_args, 'w2v_args'):
-            model_args.w2v_args = cfg.encoder.args
+            model_args.w2v_args = cfg.pre_args
         
         model_args.w2v_args.model = merge_with_parent(
             cls.PRETRAIN_MODEL_CFG,
@@ -227,7 +233,9 @@ class PretrainedWav2VecBaseEncoder(S2TPretrainedEncoder):
         model_args.data = cfg.data
         model_args.normalize = model_args.w2v_args.task.normalize
 
-        cfg.encoder.args.model = model_args
+        cfg.pre_args.model = model_args
+
+        return super().build(cfg)
 
     def load_state_dict(self, state_dict, strict=True):
         new_state_dict = {}
@@ -238,15 +246,13 @@ class PretrainedWav2VecBaseEncoder(S2TPretrainedEncoder):
                 else:                                       # Pretrained models
                     k = f"w2v_model.{k}"
             if k.endswith('label_embs_concat') or k.startswith('proj.'):
-                continue # This layers are not used
+                continue                                    # This layers are not used
             new_state_dict[k] = v
 
         super().load_state_dict(new_state_dict, strict=strict)
 
     def pre_forward(self, src_tokens, src_lengths, **kwargs):
-        encoder_in = S2TPretrainedEncoder.pre_forward(
-            self, src_tokens, src_lengths, **kwargs
-        )
+        encoder_in = super().pre_forward(src_tokens, src_lengths, **kwargs)
         encoder_in['source'] = encoder_in.pop('src_tokens')
         encoder_in['padding_mask'] = lengths_to_padding_mask(src_lengths)
         return encoder_in
@@ -254,8 +260,7 @@ class PretrainedWav2VecBaseEncoder(S2TPretrainedEncoder):
     def post_forward(self, encoder_out):
         encoder_out["encoder_padding_mask"] = encoder_out.pop("padding_mask")
         encoder_out = {k: [v] for k, v in encoder_out.items()}
-        S2TPretrainedEncoder.post_forward(self, encoder_out)
-
+        super().post_forward(encoder_out)
         return encoder_out
 
     @torch.jit.export
@@ -284,9 +289,9 @@ class PretrainedWav2VecEncoder(PretrainedWav2VecBaseEncoder, Wav2VecEncoder):
     FINETUNE_MODEL_CFG = Wav2Vec2AsrConfig
     ORIGINAL_MODEL_CLS = Wav2VecEncoder
 
-    def __init__(self, cfg: FairseqDataclass):
+    def __init__(self, cfg: S2TPretrainedEncoderConfig):
         PretrainedWav2VecBaseEncoder.__init__(self, cfg)
-        Wav2VecEncoder.__init__(self, cfg)
+        Wav2VecEncoder.__init__(self, cfg.pre_args.model)
 
 
 class HubertDummyTask(FairseqTask):
@@ -310,51 +315,46 @@ class PretrainedHubertEncoder(PretrainedWav2VecBaseEncoder, HubertEncoder):
     FINETUNE_MODEL_CFG = HubertAsrConfig
     ORIGINAL_MODEL_CLS = HubertEncoder
 
-    def __init__(self, cfg: FairseqDataclass):
+    def __init__(self, cfg: S2TPretrainedEncoderConfig):
         PretrainedWav2VecBaseEncoder.__init__(self, cfg)
-        HubertEncoder.__init__(self, cfg, HubertDummyTask(cfg))
+        HubertEncoder.__init__(self, cfg.pre_args.model, HubertDummyTask(None))
 
 
-class S2TPretrainedDecoder(FairseqDecoder):
+class S2TPretrainedDecoder(FairseqDecoder, S2TPretrainedComponent):
     """ Base class for pretrained S2T decoders """
 
-    def __init__(self, tgt_dict: Dictionary):
+    def __init__(self, cfg: S2TPretrainedDecoderConfig, tgt_dict: Dictionary):
         FairseqDecoder.__init__(self, dictionary=tgt_dict)
+        S2TPretrainedComponent.__init__(self, cfg)
 
     @classmethod
-    def get_class(cls, cfg: S2TPretrainedConfig):
-        name = cfg.decoder.args.model._name
+    def get_class(cls, cfg: S2TPretrainedDecoderConfig) -> Type['S2TPretrainedEncoder']:
+        name = cfg.pre_args.model._name
         if name.startswith('mbart'):
             return PretrainedBartDecoder
         else:
             raise ValueError(f"Unknown decoder name: {name}")
 
     @classmethod
-    def pre_build(cls, cfg: S2TPretrainedConfig) -> None:
-        pass
-
-    @classmethod
-    def build(cls, cfg: S2TPretrainedConfig, tgt_dict: Dictionary):
-        cls.pre_build(cfg)
-        return cls(cfg.decoder.args.model, tgt_dict)
+    def build(cls, cfg: S2TPretrainedDecoderConfig, tgt_dict: Dictionary) -> 'S2TPretrainedDecoder':
+        return cls(cfg, tgt_dict)
 
 
 class PretrainedBartDecoder(S2TPretrainedDecoder, TransformerDecoder):
     """ Pretrained BART decoder """
 
-    def __init__(self, cfg: FairseqDataclass, tgt_dict: Dictionary, embed_tokens: nn.Embedding):
-        S2TPretrainedDecoder.__init__(self, tgt_dict)
-        TransformerDecoder.__init__(self, cfg, tgt_dict, embed_tokens)
+    def __init__(self, cfg: S2TPretrainedDecoderConfig, tgt_dict: Dictionary, embed_tokens: nn.Embedding):
+        S2TPretrainedDecoder.__init__(self, cfg, tgt_dict)
+        TransformerDecoder.__init__(self, cfg.pre_args.model, tgt_dict, embed_tokens)
 
     @classmethod
-    def build(cls, cfg: S2TPretrainedConfig, tgt_dict: Dictionary):
-        cls.pre_build(cfg)
+    def build(cls, cfg: S2TPretrainedDecoderConfig, tgt_dict: Dictionary) -> 'S2TPretrainedDecoder':
         embed_tokens = TransformerModelBase.build_embedding(
-            cfg.decoder.args.model,
+            cfg.pre_args.model,
             tgt_dict,
-            cfg.decoder.args.model.decoder_embed_dim
+            cfg.pre_args.model.decoder_embed_dim
         )
-        return cls(cfg.decoder.args.model, tgt_dict, embed_tokens)
+        return cls(cfg, tgt_dict, embed_tokens)
 
     def load_state_dict(self, state_model, strict=True):
         new_state_dict = {}
@@ -369,4 +369,4 @@ class PretrainedBartDecoder(S2TPretrainedDecoder, TransformerDecoder):
             new_state_dict["output_projection.weight"] = \
                 new_state_dict["embed_tokens.weight"]
 
-        super().load_state_dict(new_state_dict, strict=strict)
+        S2TPretrainedDecoder.load_state_dict(self, new_state_dict, strict=strict)

@@ -176,6 +176,12 @@ class SpeechToTextTask(FairseqTask):
             [model],
             self.cfg.eval_gen_config
         )
+        # Trick: update model configuration globally
+        if not safe_hasattr(cfg.encoder, 'pre_args'):
+            cfg.encoder.pre_args = model.encoder.cfg_.pre_args
+        if not safe_hasattr(cfg.decoder, 'pre_args'):
+            cfg.decoder.pre_args = model.decoder.cfg_.pre_args
+
         return model
 
     def valid_step(self, sample, model, criterion):
