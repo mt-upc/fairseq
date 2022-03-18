@@ -105,7 +105,10 @@ class S2TPretrainedEncoderConfig(S2TPretrainedComponentConfig):
 
 @dataclass
 class S2TPretrainedDecoderConfig(S2TPretrainedComponentConfig):
-    pass
+    cross_attention_dropout: float = field(
+        default=II('model.decoder.attention_dropout'),
+        metadata={"help": "dropout probability for cross-attention weights"},
+    )
 
 
 @dataclass
@@ -446,7 +449,14 @@ class PretrainedBartDecoder(S2TPretrainedDecoder, TransformerDecoder):
             tgt_dict,
             cfg.pre_args.model.decoder_embed_dim
         )
-        return cls(cfg, tgt_dict, embed_tokens)
+        decoder = cls(cfg, tgt_dict, embed_tokens)
+
+        # XXX: Put this in S2TPretrainedDecoder class in the future
+        if cfg.cross_attention_dropout != cfg.attention_dropout:
+            for l in decoder.layers:
+                l.encoder_attn.dropout_module.p = cfg.cross_attention_dropout
+
+        return decoder
 
     def load_state_dict(self, state_model, strict=True):
         new_state_dict = {}
