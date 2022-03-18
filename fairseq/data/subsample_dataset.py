@@ -41,8 +41,8 @@ class SubsampleDataset(BaseWrapperDataset):
     def __len__(self):
         return self.actual_size
 
-    def collater(self, samples):
-        return self.dataset.collater(samples)
+    def collater(self, samples, return_order=False):
+        return self.dataset.collater(samples, return_order)
 
     @property
     def sizes(self):
