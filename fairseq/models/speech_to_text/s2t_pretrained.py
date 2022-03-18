@@ -196,7 +196,8 @@ class S2TPretrainedComponent:
         reset_params = []
         for n in list(state['model'].keys()):
             for l in self.cfg_.layers_to_reset:
-                if l in n:
+                l = re.compile(eval(l))
+                if re.match(l, n):
                     state['model'].pop(n)
                     reset_params.append(n)
         logger.info(
@@ -218,7 +219,8 @@ class S2TPretrainedComponent:
         frozen_params = []
         for n, p in self.named_parameters():
             for l in self.cfg_.layers_to_freeze:
-                if l in n:
+                l = re.compile(eval(l))
+                if re.match(l, n):
                     p.requires_grad = False
                     frozen_params.append(n)
         logger.info(
