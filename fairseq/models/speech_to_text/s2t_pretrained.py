@@ -1,5 +1,6 @@
 import re
 import logging
+from copy import deepcopy
 from dataclasses import dataclass, field
 from omegaconf import II, DictConfig
 from typing import Any, Optional, Dict, List, Type
@@ -80,6 +81,10 @@ class S2TPretrainedComponentConfig(FairseqDataclass):
     layers_to_freeze: List[str] = field(
         default_factory= lambda: [],
         metadata={"help": "list of layers to freeze in pretrained component (no_load_weights must be False)"},
+    )
+    layers_to_reset: List[str] = field(
+        default_factory= lambda: [],
+        metadata={"help": "list of layers to reset in pretrained component (no_load_weights must be False)"},
     )
     dropout: float = field(default=0.0, metadata={"help": "dropout probability"})
     attention_dropout: float = field(
@@ -182,26 +187,43 @@ class S2TPretrainedComponent:
                 logger.info(f"Not loading weights from pretrained {component_type}")
             else:
                 logger.info(f"Loading weights from pretrained {component_type}")
-                component.load_state_dict(state['model'])
-                component.freeze_layers(cfg.layers_to_freeze)
+                component.load_weights(state)
+                component.freeze_layers()
 
         return component
 
+    def load_weights(self, state: Dict):
+        reset_params = []
+        for n in list(state['model'].keys()):
+            for l in self.cfg_.layers_to_reset:
+                if l in n:
+                    state['model'].pop(n)
+                    reset_params.append(n)
+        logger.info(
+            f"Parameters to be resetted:\n\t" + '\n\t'.join(reset_params)
+        )
 
-    def freeze_layers(self, layers: List[str]) -> None:
-        all_params = [n for n, _ in self.named_parameters()]
+        missing_keys, unexpected_keys = \
+            self.load_state_dict(state['model'], strict=False)
+
+        logger.info(
+            f"Missing keys in state dict (some may correspond to resetted parameters):\n\t" + \
+                '\n\t'.join(missing_keys)
+        )
+        logger.info(
+            f"Unexpected keys in state dict:\n\t" + '\n\t'.join(unexpected_keys)
+        )
+
+    def freeze_layers(self) -> None:
         frozen_params = []
-        for l in layers:
-            frozen_params_ = []
-            for n, p in self.named_parameters():
+        for n, p in self.named_parameters():
+            for l in self.cfg_.layers_to_freeze:
                 if l in n:
                     p.requires_grad = False
-                    frozen_params_.append(n)
-            logger.info(f"Freezing parameters: {frozen_params_}")
-            frozen_params.extend(frozen_params_)
-
-        trainable_params = list(set(all_params).difference(frozen_params))
-        logger.info(f"Not freezing parameters: {trainable_params}")
+                    frozen_params.append(n)
+        logger.info(
+            f"Freezing parameters:\n\t" + '\n\t'.join(frozen_params)
+        )
 
 
 class S2TPretrainedEncoder(FairseqEncoder, S2TPretrainedComponent):
@@ -259,13 +281,6 @@ class S2TPretrainedEncoder(FairseqEncoder, S2TPretrainedComponent):
                 encoder_out["encoder_out"][i], lengths = self.length_adaptor(eo, lengths.to(eo.device))
                 encoder_out["encoder_padding_mask"][i] = lengths_to_padding_mask(lengths)
         return encoder_out
-
-    def load_state_dict(self, state_dict, strict=True):
-        # Trick to avoid errors when length adaptor is not present in state_dict
-        for n, p in self.named_parameters():
-            if n.startswith('length_adaptor') and n not in state_dict.keys():
-                state_dict[n] = p.data
-        super().load_state_dict(state_dict, strict=strict)
 
 
 class PretrainedWav2VecBaseEncoder(S2TPretrainedEncoder):
@@ -333,7 +348,7 @@ class PretrainedWav2VecBaseEncoder(S2TPretrainedEncoder):
                 continue                                    # This layers are not used
             new_state_dict[k] = v
 
-        super().load_state_dict(new_state_dict, strict=strict)
+        return super().load_state_dict(new_state_dict, strict=strict)
 
     def pre_forward(self, src_tokens, src_lengths, **kwargs):
         encoder_in = super().pre_forward(src_tokens, src_lengths, **kwargs)
@@ -471,4 +486,4 @@ class PretrainedBartDecoder(S2TPretrainedDecoder, TransformerDecoder):
             new_state_dict["output_projection.weight"] = \
                 new_state_dict["embed_tokens.weight"]
 
-        S2TPretrainedDecoder.load_state_dict(self, new_state_dict, strict=strict)
+        return S2TPretrainedDecoder.load_state_dict(self, new_state_dict, strict=strict)
