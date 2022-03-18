@@ -65,6 +65,16 @@ class S2TPretrainedComponentConfig(FairseqDataclass):
         default=False,
         metadata={"help": "don't load weights from pretrained component"},
     )
+    dropout: float = field(default=0.0, metadata={"help": "dropout probability"})
+    attention_dropout: float = field(
+        default=0.0,
+        metadata={"help": "dropout probability for attention weights"},
+    )
+    activation_dropout: float = field(
+        default=0.0,
+        metadata={"help": "dropout probability after activation in FFN."},
+    )
+    layerdrop: float = field(default=0, metadata={"help": "LayerDrop probability"})
     pre_args: Any = None # Store the args once the training has started
     data: str = II("task.data")
 
@@ -122,6 +132,12 @@ class S2TPretrainedComponent:
             cfg.pre_args = convert_namespace_to_omegaconf(state["args"])
         else:
             raise ValueError('Could not find args in checkpoint')
+        
+    @classmethod
+    def update_pre_args(cls, cfg: S2TPretrainedComponentConfig) -> None:
+        cfg.pre_args.model.dropout = cfg.dropout
+        cfg.pre_args.model.attention_dropout = cfg.attention_dropout
+        cfg.pre_args.model.activation_dropout = cfg.activation_dropout
 
     @classmethod
     def build(cls, cfg: S2TPretrainedComponentConfig, dictionary: Dictionary = None) -> Type['S2TPretrainedComponent']:
@@ -170,7 +186,12 @@ class S2TPretrainedEncoder(FairseqEncoder, S2TPretrainedComponent):
             raise ValueError(f"Unknown encoder name: {name}")
 
     @classmethod
+    def update_pre_args(cls, cfg: S2TPretrainedEncoderConfig) -> None:
+        return S2TPretrainedComponent.update_pre_args(cfg)
+
+    @classmethod
     def build(cls, cfg: S2TPretrainedEncoderConfig) -> 'S2TPretrainedEncoder':
+        cls.update_pre_args(cfg)
         return cls(cfg)
 
     def pre_forward(self, src_tokens, src_lengths, **kwargs):
@@ -207,6 +228,16 @@ class PretrainedWav2VecBaseEncoder(S2TPretrainedEncoder):
 
     def __init__(self, cfg: S2TPretrainedEncoderConfig):
         super().__init__(cfg)
+
+    @classmethod
+    def update_pre_args(cls, cfg: S2TPretrainedComponentConfig) -> None:
+        super().update_pre_args(cfg)
+        cfg.pre_args.model.final_dropout = cfg.dropout
+        cfg.pre_args.model.w2v_args.model.dropout = cfg.dropout
+        cfg.pre_args.model.w2v_args.model.attention_dropout = cfg.attention_dropout
+        cfg.pre_args.model.w2v_args.model.activation_dropout = cfg.activation_dropout
+        cfg.pre_args.model.w2v_args.model.dropout_input = cfg.dropout
+        cfg.pre_args.model.w2v_args.model.encoder_layerdrop = cfg.layerdrop
 
     @classmethod
     def build(cls, cfg: S2TPretrainedEncoderConfig) -> 'PretrainedWav2VecBaseEncoder':
@@ -344,7 +375,12 @@ class S2TPretrainedDecoder(FairseqDecoder, S2TPretrainedComponent):
             raise ValueError(f"Unknown decoder name: {name}")
 
     @classmethod
+    def update_pre_args(cls, cfg: S2TPretrainedDecoderConfig) -> None:
+        return S2TPretrainedComponent.update_pre_args(cfg)
+
+    @classmethod
     def build(cls, cfg: S2TPretrainedDecoderConfig, tgt_dict: Dictionary) -> 'S2TPretrainedDecoder':
+        cls.update_pre_args(cfg)
         return cls(cfg, tgt_dict)
 
 
@@ -356,7 +392,13 @@ class PretrainedBartDecoder(S2TPretrainedDecoder, TransformerDecoder):
         TransformerDecoder.__init__(self, cfg.pre_args.model, tgt_dict, embed_tokens)
 
     @classmethod
+    def update_pre_args(cls, cfg: S2TPretrainedComponentConfig) -> None:
+        super().update_pre_args(cfg)
+        cfg.pre_args.model.layerdrop = cfg.layerdrop
+
+    @classmethod
     def build(cls, cfg: S2TPretrainedDecoderConfig, tgt_dict: Dictionary) -> 'S2TPretrainedDecoder':
+        cls.update_pre_args(cfg)
         embed_tokens = TransformerModelBase.build_embedding(
             cfg.pre_args.model,
             tgt_dict,
