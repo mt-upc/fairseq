@@ -125,7 +125,7 @@ class S2TPretrainedComponent:
         self.cfg_ = cfg
 
     @staticmethod
-    def load_args(cfg: S2TPretrainedComponentConfig, state: Dict) -> None:
+    def load_pre_args(cfg: S2TPretrainedComponentConfig, state: Dict) -> None:
         if state.get("cfg", None) is not None:
             cfg.pre_args = state['cfg']
         elif state.get("args", None) is not None:
@@ -147,7 +147,7 @@ class S2TPretrainedComponent:
         if training:
             logger.info(f"Building {component_type} from: {cfg.path}")
             state = load_checkpoint_to_cpu(cfg.path)
-            S2TPretrainedComponent.load_args(cfg, state)
+            S2TPretrainedComponent.load_pre_args(cfg, state)
 
         if component_type == 'encoder':
             component = S2TPretrainedEncoder.get_class(cfg).build(cfg)
