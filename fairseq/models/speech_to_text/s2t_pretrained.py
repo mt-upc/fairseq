@@ -2,7 +2,7 @@ import re
 import logging
 from dataclasses import dataclass, field
 from omegaconf import II, DictConfig
-from typing import Any, Optional, Dict, Type
+from typing import Any, Optional, Dict, List, Type
 
 import torch
 import torch.nn as nn
@@ -35,6 +35,7 @@ from fairseq.models.transformer import (
     TransformerModelBase,
     TransformerDecoder,
 )
+from fairseq.models.speech_to_text import Conv1dSubsampler
 from fairseq.tasks import FairseqTask
 from fairseq.tasks.audio_pretraining import AudioPretrainingConfig
 from fairseq.tasks.hubert_pretraining import HubertPretrainingConfig
@@ -46,12 +47,23 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
-class S2TCouplingLayersConfig(FairseqDataclass):
-    in_dim: int = field(
-        default=1024, metadata={"help": "input dimension"}
+class S2TLengthAdaptorConfig(FairseqDataclass):
+    in_channels: int = field(
+        default=1024,
+        metadata={"help": "# of input channels in the Length Adaptor"}
     )
-    out_dim: int = field(
-        default=1024, metadata={"help": "output dimension"}
+    mid_channels: int = field(
+        default=1024,
+        metadata={"help": "# of intermediate channels in the Length Adaptor"}
+    )
+    out_channels: int = field(
+        default=1024,
+        metadata={"help": "# of output channels in the Length Adaptor"}
+    )
+
+    kernel_sizes: List[int] = field(
+        default_factory=lambda: [3, 3, 3],
+        metadata={"help": "kernel size of each Conv1d layer in the Length Adaptor"}
     )
 
 
@@ -81,9 +93,9 @@ class S2TPretrainedComponentConfig(FairseqDataclass):
 
 @dataclass
 class S2TPretrainedEncoderConfig(S2TPretrainedComponentConfig):
-    coupling: Optional[S2TCouplingLayersConfig] = field(
+    length_adaptor: Optional[S2TLengthAdaptorConfig] = field(
         default=None,
-        metadata={"help": "apply coupling layers to the encoder output"},
+        metadata={"help": "length adaptor configuration"},
     )
 
 
@@ -151,8 +163,8 @@ class S2TPretrainedComponent:
 
         if component_type == 'encoder':
             component = S2TPretrainedEncoder.get_class(cfg).build(cfg)
-            if safe_hasattr(cfg, "coupling") and not safe_hasattr(component, "coupling_layers"):
-                component.add_coupling_layers(cfg.coupling)
+            if safe_hasattr(cfg, "length_adaptor") and not safe_hasattr(component, "length_adaptor"):
+                component.add_length_adaptor(cfg.length_adaptor)
         elif component_type == 'decoder':
             component = S2TPretrainedDecoder.get_class(cfg).build(cfg, dictionary)
         else:
@@ -194,6 +206,14 @@ class S2TPretrainedEncoder(FairseqEncoder, S2TPretrainedComponent):
         cls.update_pre_args(cfg)
         return cls(cfg)
 
+    def add_length_adaptor(self, cfg: S2TLengthAdaptorConfig) -> None:
+        self.length_adaptor = Conv1dSubsampler(
+            in_channels=cfg.in_channels,
+            mid_channels=cfg.mid_channels,
+            out_channels=cfg.out_channels,
+            kernel_sizes=cfg.kernel_sizes,
+        )
+
     def pre_forward(self, src_tokens, src_lengths, **kwargs):
         return {
             'src_tokens': src_tokens,
@@ -207,18 +227,19 @@ class S2TPretrainedEncoder(FairseqEncoder, S2TPretrainedComponent):
         return self.post_forward(encoder_out)
 
     def post_forward(self, encoder_out):
-        if safe_hasattr(self, "coupling_layers"):
-            for i, eo in enumerate(encoder_out["encoder_out"]):
-                encoder_out["encoder_out"][i] = self.coupling_layers(eo)
+        if safe_hasattr(self, "length_adaptor"):
+            for i, (eo, epm) in enumerate(zip(encoder_out["encoder_out"], encoder_out["encoder_padding_mask"])):
+                eo = eo.transpose(0, 1)
+                lengths = (~epm).sum(dim=1) \
+                    if epm is not None else torch.LongTensor([eo.size(1)] * eo.size(0))
+                encoder_out["encoder_out"][i], lengths = self.length_adaptor(eo, lengths.to(eo.device))
+                encoder_out["encoder_padding_mask"][i] = lengths_to_padding_mask(lengths)
         return encoder_out
 
-    def add_coupling_layers(self, cfg: S2TCouplingLayersConfig) -> None:
-        self.coupling_layers = nn.Linear(cfg.in_dim, cfg.out_dim)
-
     def load_state_dict(self, state_dict, strict=True):
-        # Trick to avoid errors when coupling layers are not present in state_dict
+        # Trick to avoid errors when length adaptor is not present in state_dict
         for n, p in self.named_parameters():
-            if n.startswith('coupling_layers') and n not in state_dict.keys():
+            if n.startswith('length_adaptor') and n not in state_dict.keys():
                 state_dict[n] = p.data
         super().load_state_dict(state_dict, strict=strict)
 
