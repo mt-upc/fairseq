@@ -16,7 +16,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from fairseq.data import ConcatDataset, Dictionary, FairseqDataset, ResamplingDataset
+from fairseq.data import ConcatDataset, Dictionary, FairseqDataset, ResamplingDataset, SubsampleDataset
 from fairseq.data import data_utils as fairseq_data_utils
 from fairseq.data.audio.audio_utils import (
     FEATURE_OR_SF_AUDIO_FILE_EXTENSIONS,
@@ -125,6 +125,8 @@ class SpeechToTextDatasetItem(object):
     source: torch.Tensor
     target: Optional[torch.Tensor] = None
     speaker_id: Optional[int] = None
+    id: Optional[str] = None
+    split: Optional[str] = None
 
 
 class SpeechToTextDataset(FairseqDataset):
@@ -285,7 +287,7 @@ class SpeechToTextDataset(FairseqDataset):
         if self.speaker_to_id is not None:
             speaker_id = self.speaker_to_id[self.speakers[index]]
         return SpeechToTextDatasetItem(
-            index=index, source=source, target=target, speaker_id=speaker_id
+            index=index, source=source, target=target, speaker_id=speaker_id, id=self.ids[index], split=self.split
         )
 
     def __len__(self):
@@ -525,6 +527,8 @@ class SpeechToTextDatasetCreator(object):
         seed: int,
         n_frames_per_step: int = 1,
         speaker_to_id=None,
+        sampling_ratios=None,
+        no_standardize_audio: bool = False
     ) -> SpeechToTextDataset:
         datasets = [
             cls._from_tsv(
@@ -540,15 +544,28 @@ class SpeechToTextDatasetCreator(object):
             )
             for split in splits.split(",")
         ]
+        
+        if no_standardize_audio:
+            for d in datasets:
+                d.cfg.standardize_audio = False
 
-        if is_train_split and len(datasets) > 1 and cfg.sampling_alpha != 1.0:
+        if is_train_split and len(datasets) > 1:
             # temperature-based sampling
-            size_ratios = cls.get_size_ratios(datasets, alpha=cfg.sampling_alpha)
-            datasets = [
-                ResamplingDataset(
-                    d, size_ratio=r, seed=seed, epoch=epoch, replace=(r >= 1.0)
-                )
-                for r, d in zip(size_ratios, datasets)
-            ]
+            if sampling_ratios is None:
+                size_ratios = cls.get_size_ratios(datasets, alpha=cfg.sampling_alpha)
+                datasets = [
+                    ResamplingDataset(
+                        d, size_ratio=r, seed=seed, epoch=epoch, replace=(r >= 1.0)
+                    )
+                    for r, d in zip(size_ratios, datasets)
+                ]
+            # normal subsampling based on given ratios
+            else:
+                datasets = [
+                    SubsampleDataset(d, r)
+                    for r, d in zip(sampling_ratios, datasets)
+                ]
+                for d, s in zip(datasets, splits.split(",")):
+                    d.split = s
 
         return ConcatDataset(datasets) if len(datasets) > 1 else datasets[0]
