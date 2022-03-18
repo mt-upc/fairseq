@@ -77,6 +77,10 @@ class S2TPretrainedComponentConfig(FairseqDataclass):
         default=False,
         metadata={"help": "don't load weights from pretrained component"},
     )
+    layers_to_freeze: List[str] = field(
+        default_factory= lambda: [],
+        metadata={"help": "list of layers to freeze in pretrained component (no_load_weights must be False)"},
+    )
     dropout: float = field(default=0.0, metadata={"help": "dropout probability"})
     attention_dropout: float = field(
         default=0.0,
@@ -176,8 +180,25 @@ class S2TPretrainedComponent:
             else:
                 logger.info(f"Loading weights from pretrained {component_type}")
                 component.load_state_dict(state['model'])
+                component.freeze_layers(cfg.layers_to_freeze)
 
         return component
+
+
+    def freeze_layers(self, layers: List[str]) -> None:
+        all_params = [n for n, _ in self.named_parameters()]
+        frozen_params = []
+        for l in layers:
+            frozen_params_ = []
+            for n, p in self.named_parameters():
+                if l in n:
+                    p.requires_grad = False
+                    frozen_params_.append(n)
+            logger.info(f"Freezing parameters: {frozen_params_}")
+            frozen_params.extend(frozen_params_)
+
+        trainable_params = list(set(all_params).difference(frozen_params))
+        logger.info(f"Not freezing parameters: {trainable_params}")
 
 
 class S2TPretrainedEncoder(FairseqEncoder, S2TPretrainedComponent):
