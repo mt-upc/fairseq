@@ -8,6 +8,7 @@ from pathlib import Path
 from argparse import Namespace
 from omegaconf import II, MISSING
 from dataclasses import dataclass, field
+from typing import Optional
 
 from fairseq import utils, metrics, scoring
 from fairseq.data import Dictionary, encoders
@@ -17,6 +18,9 @@ from fairseq.data.audio.speech_to_text_dataset import (
     SpeechToTextDatasetCreator,
     get_features_or_waveform,
 )
+from fairseq.data.audio.speech_augmentation_dataset import SpeechAugmentationDataset
+from fairseq.data.audio.speech_distillation_dataset import SpeechDistillationDataset
+
 from fairseq.dataclass import FairseqDataclass
 from fairseq.dataclass.configs import GenerationConfig
 from fairseq.scoring.wer import WerScorerConfig
@@ -27,6 +31,52 @@ from fairseq.utils import safe_hasattr
 
 logger = logging.getLogger(__name__)
 
+@dataclass
+class DataAugmentationConfig(FairseqDataclass):
+    p_augm: float = field(
+        default=0,
+        metadata={"help":
+            "The probability that data augmentation is applied to an example."
+            "0 means that data augmentation is not active."
+        }
+    )
+    tempo: str = field(
+        default="1,1",
+        metadata={"help": "The range from which to sample the tempo factor"}
+    )
+    pitch: str = field(
+        default="0,0",
+        metadata={"help":
+            "The range from which to sample the pitch value."
+            "Measured in cents (i.e. 100ths of a semitone)"
+        }
+    )
+    echo_delay: str = field(
+        default="0,0",
+        metadata={"help":
+            "The range from which to sample the echo delay value."
+            "Measured in milliseconds"
+        }
+    )
+    echo_decay: str = field(
+        default="0,0",
+        metadata={"help": "The range from which to sample the echo decay factor."}
+    )
+
+@dataclass
+class KnowledgeDistillationConfig(FairseqDataclass):
+    path: str = field(
+        default="1",
+        metadata={"help": "path to teacher outputs: ${path}/${split}/*.pt"}
+    )
+    loss_lambda: float = field(
+        default=0,
+        metadata={"help": "The weight of the KD criterion. 0 means that KD is not active"}
+    )
+    temperature: float = field(
+        default=1,
+        metadata={"help": "Temperature to normalize the distributions of student and teacher."}
+    )
 
 @dataclass
 class SpeechToTextTaskConfig(FairseqDataclass):
@@ -72,6 +122,23 @@ class SpeechToTextTaskConfig(FairseqDataclass):
     # Inherit from other configs
     train_subset: str = II("dataset.train_subset")
     seed: int = II("common.seed")
+    
+    data_augmentation: Optional[DataAugmentationConfig] = field(
+        default=None,
+        metadata={"help": "Data augmentation arguments"},
+    )
+    knowledge_distillation: Optional[KnowledgeDistillationConfig] = field(
+        default=None,
+        metadata={"help": "Knowledge distillation arguments"}
+    )
+    sampling_ratios: str = field(
+        default="1",
+        metadata={"help": "sampling ratios of the train subsets"}
+    )
+    interactive_tgt_lang: Optional[str] = field(
+        default=None,
+        metadata={"help": "Target language to be used with Fairseq's interactive mode."}
+    )
 
 
 @register_task("speech_to_text", dataclass=SpeechToTextTaskConfig)
@@ -93,6 +160,18 @@ class SpeechToTextTask(FairseqTask):
             self.scorers.append(
                 scoring.build_scorer(cfg.eval_bleu_config, self.tgt_dict)
             )
+            
+        # effect parameters for data augmentation
+        self.effects_info = {
+            "tempo": list(map(float, cfg.data_augmentation.tempo.split(","))),
+            "pitch": list(map(int, cfg.data_augmentation.pitch.split(","))),
+            "echo": {
+                "delay": list(map(int, cfg.data_augmentation.echo_delay.split(","))),
+                "decay": list(map(float, cfg.data_augmentation.echo_decay.split(",")))
+            }
+        }
+        self.sampling_ratios = list(map(float, cfg.sampling_ratios.split(",")))
+        self.sampling_ratios = [0.999999999 if r==1 else r for r in self.sampling_ratios]
 
     def _get_speaker_to_id(self):
         speaker_to_id = None
@@ -114,9 +193,9 @@ class SpeechToTextTask(FairseqTask):
             f"dictionary size ({data_cfg.vocab_filename}): " f"{len(tgt_dict):,}"
         )
 
-        if getattr(cfg, "train_subset", None) is not None:
-            if not all(s.startswith("train") for s in cfg.train_subset.split(",")):
-                raise ValueError('Train splits should be named like "train*".')
+        # if getattr(cfg, "train_subset", None) is not None:
+        #     if not all(s.startswith("train") for s in cfg.train_subset.split(",")):
+        #         raise ValueError('Train splits should be named like "train*".')
 
         if cfg.eval_wer:
             if cfg.eval_wer_config.wer_tokenizer == "none":
@@ -144,8 +223,9 @@ class SpeechToTextTask(FairseqTask):
             )
         return criterions.build_criterion(cfg, self)
 
-    def load_dataset(self, split, epoch=1, combine=False, **kwargs):
-        is_train_split = split.startswith("train")
+    def load_dataset(self, split, epoch=1, **kwargs):
+        # TODO: make sure all the train sets start with train
+        is_train_split = split.startswith("train") or "covost" in split or "europarl" in split
         self.datasets[split] = SpeechToTextDatasetCreator.from_tsv(
             self.cfg.data,
             self.data_cfg,
@@ -157,7 +237,25 @@ class SpeechToTextTask(FairseqTask):
             epoch=epoch,
             seed=self.cfg.seed,
             speaker_to_id=self.speaker_to_id,
+            sampling_ratios=self.sampling_ratios,
+            no_standardize_audio=is_train_split and self.cfg.data_augmentation.p_augm > 0
         )
+        
+        if is_train_split:
+            if self.cfg.knowledge_distillation.loss_lambda > 0:
+                self.datasets[split] = SpeechDistillationDataset(
+                    self.datasets[split],
+                    self.cfg.knowledge_distillation.path,
+                    pad_idx=self.tgt_dict.pad()
+                )
+            
+            if self.cfg.data_augmentation.p_augm > 0:
+                self.datasets[split] = SpeechAugmentationDataset(
+                    self.datasets[split],
+                    effects_info=self.effects_info,
+                    p_augm=self.cfg.data_augmentation.p_augm,
+                    max_src_len=self.cfg.max_source_positions
+                )
 
     @property
     def target_dictionary(self):
