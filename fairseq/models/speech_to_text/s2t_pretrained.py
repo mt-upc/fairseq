@@ -1,8 +1,9 @@
 import re
 import logging
+from copy import deepcopy
 from dataclasses import dataclass, field
 from omegaconf import II, DictConfig
-from typing import Any, Optional, Dict, Type
+from typing import Any, Optional, Dict, List, Type
 
 import torch
 import torch.nn as nn
@@ -35,6 +36,7 @@ from fairseq.models.transformer import (
     TransformerModelBase,
     TransformerDecoder,
 )
+from fairseq.models.speech_to_text import Conv1dSubsampler
 from fairseq.tasks import FairseqTask
 from fairseq.tasks.audio_pretraining import AudioPretrainingConfig
 from fairseq.tasks.hubert_pretraining import HubertPretrainingConfig
@@ -46,12 +48,23 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
-class S2TCouplingLayersConfig(FairseqDataclass):
-    in_dim: int = field(
-        default=1024, metadata={"help": "input dimension"}
+class S2TLengthAdaptorConfig(FairseqDataclass):
+    in_channels: int = field(
+        default=1024,
+        metadata={"help": "# of input channels in the Length Adaptor"}
     )
-    out_dim: int = field(
-        default=1024, metadata={"help": "output dimension"}
+    mid_channels: int = field(
+        default=1024,
+        metadata={"help": "# of intermediate channels in the Length Adaptor"}
+    )
+    out_channels: int = field(
+        default=1024,
+        metadata={"help": "# of output channels in the Length Adaptor"}
+    )
+
+    kernel_sizes: List[int] = field(
+        default_factory=lambda: [3, 3, 3],
+        metadata={"help": "kernel size of each Conv1d layer in the Length Adaptor"}
     )
 
 
@@ -65,21 +78,42 @@ class S2TPretrainedComponentConfig(FairseqDataclass):
         default=False,
         metadata={"help": "don't load weights from pretrained component"},
     )
+    layers_to_freeze: List[str] = field(
+        default_factory= lambda: [],
+        metadata={"help": "list of layers to freeze in pretrained component (no_load_weights must be False)"},
+    )
+    layers_to_reset: List[str] = field(
+        default_factory= lambda: [],
+        metadata={"help": "list of layers to reset in pretrained component (no_load_weights must be False)"},
+    )
+    dropout: float = field(default=0.0, metadata={"help": "dropout probability"})
+    attention_dropout: float = field(
+        default=0.0,
+        metadata={"help": "dropout probability for attention weights"},
+    )
+    activation_dropout: float = field(
+        default=0.0,
+        metadata={"help": "dropout probability after activation in FFN."},
+    )
+    layerdrop: float = field(default=0, metadata={"help": "LayerDrop probability"})
     pre_args: Any = None # Store the args once the training has started
     data: str = II("task.data")
 
 
 @dataclass
 class S2TPretrainedEncoderConfig(S2TPretrainedComponentConfig):
-    coupling: Optional[S2TCouplingLayersConfig] = field(
+    length_adaptor: Optional[S2TLengthAdaptorConfig] = field(
         default=None,
-        metadata={"help": "apply coupling layers to the encoder output"},
+        metadata={"help": "length adaptor configuration"},
     )
 
 
 @dataclass
 class S2TPretrainedDecoderConfig(S2TPretrainedComponentConfig):
-    pass
+    cross_attention_dropout: float = field(
+        default=II('model.decoder.attention_dropout'),
+        metadata={"help": "dropout probability for cross-attention weights"},
+    )
 
 
 @dataclass
@@ -115,13 +149,19 @@ class S2TPretrainedComponent:
         self.cfg_ = cfg
 
     @staticmethod
-    def load_args(cfg: S2TPretrainedComponentConfig, state: Dict) -> None:
+    def load_pre_args(cfg: S2TPretrainedComponentConfig, state: Dict) -> None:
         if state.get("cfg", None) is not None:
             cfg.pre_args = state['cfg']
         elif state.get("args", None) is not None:
             cfg.pre_args = convert_namespace_to_omegaconf(state["args"])
         else:
             raise ValueError('Could not find args in checkpoint')
+        
+    @classmethod
+    def update_pre_args(cls, cfg: S2TPretrainedComponentConfig) -> None:
+        cfg.pre_args.model.dropout = cfg.dropout
+        cfg.pre_args.model.attention_dropout = cfg.attention_dropout
+        cfg.pre_args.model.activation_dropout = cfg.activation_dropout
 
     @classmethod
     def build(cls, cfg: S2TPretrainedComponentConfig, dictionary: Dictionary = None) -> Type['S2TPretrainedComponent']:
@@ -131,12 +171,12 @@ class S2TPretrainedComponent:
         if training:
             logger.info(f"Building {component_type} from: {cfg.path}")
             state = load_checkpoint_to_cpu(cfg.path)
-            S2TPretrainedComponent.load_args(cfg, state)
+            S2TPretrainedComponent.load_pre_args(cfg, state)
 
         if component_type == 'encoder':
             component = S2TPretrainedEncoder.get_class(cfg).build(cfg)
-            if safe_hasattr(cfg, "coupling") and not safe_hasattr(component, "coupling_layers"):
-                component.add_coupling_layers(cfg.coupling)
+            if safe_hasattr(cfg, "length_adaptor") and not safe_hasattr(component, "length_adaptor"):
+                component.add_length_adaptor(cfg.length_adaptor)
         elif component_type == 'decoder':
             component = S2TPretrainedDecoder.get_class(cfg).build(cfg, dictionary)
         else:
@@ -147,9 +187,45 @@ class S2TPretrainedComponent:
                 logger.info(f"Not loading weights from pretrained {component_type}")
             else:
                 logger.info(f"Loading weights from pretrained {component_type}")
-                component.load_state_dict(state['model'])
+                component.load_weights(state)
+                component.freeze_layers()
 
         return component
+
+    def load_weights(self, state: Dict):
+        reset_params = []
+        for n in list(state['model'].keys()):
+            for l in self.cfg_.layers_to_reset:
+                l = re.compile(eval(l))
+                if re.match(l, n):
+                    state['model'].pop(n)
+                    reset_params.append(n)
+        logger.info(
+            f"Parameters to be resetted:\n\t" + '\n\t'.join(reset_params)
+        )
+
+        missing_keys, unexpected_keys = \
+            self.load_state_dict(state['model'], strict=False)
+
+        logger.info(
+            f"Missing keys in state dict (some may correspond to resetted parameters):\n\t" + \
+                '\n\t'.join(missing_keys)
+        )
+        logger.info(
+            f"Unexpected keys in state dict:\n\t" + '\n\t'.join(unexpected_keys)
+        )
+
+    def freeze_layers(self) -> None:
+        frozen_params = []
+        for n, p in self.named_parameters():
+            for l in self.cfg_.layers_to_freeze:
+                l = re.compile(eval(l))
+                if re.match(l, n):
+                    p.requires_grad = False
+                    frozen_params.append(n)
+        logger.info(
+            f"Freezing parameters:\n\t" + '\n\t'.join(frozen_params)
+        )
 
 
 class S2TPretrainedEncoder(FairseqEncoder, S2TPretrainedComponent):
@@ -170,8 +246,21 @@ class S2TPretrainedEncoder(FairseqEncoder, S2TPretrainedComponent):
             raise ValueError(f"Unknown encoder name: {name}")
 
     @classmethod
+    def update_pre_args(cls, cfg: S2TPretrainedEncoderConfig) -> None:
+        return S2TPretrainedComponent.update_pre_args(cfg)
+
+    @classmethod
     def build(cls, cfg: S2TPretrainedEncoderConfig) -> 'S2TPretrainedEncoder':
+        cls.update_pre_args(cfg)
         return cls(cfg)
+
+    def add_length_adaptor(self, cfg: S2TLengthAdaptorConfig) -> None:
+        self.length_adaptor = Conv1dSubsampler(
+            in_channels=cfg.in_channels,
+            mid_channels=cfg.mid_channels,
+            out_channels=cfg.out_channels,
+            kernel_sizes=cfg.kernel_sizes,
+        )
 
     def pre_forward(self, src_tokens, src_lengths, **kwargs):
         return {
@@ -186,20 +275,14 @@ class S2TPretrainedEncoder(FairseqEncoder, S2TPretrainedComponent):
         return self.post_forward(encoder_out)
 
     def post_forward(self, encoder_out):
-        if safe_hasattr(self, "coupling_layers"):
-            for i, eo in enumerate(encoder_out["encoder_out"]):
-                encoder_out["encoder_out"][i] = self.coupling_layers(eo)
+        if safe_hasattr(self, "length_adaptor"):
+            for i, (eo, epm) in enumerate(zip(encoder_out["encoder_out"], encoder_out["encoder_padding_mask"])):
+                eo = eo.transpose(0, 1)
+                lengths = (~epm).sum(dim=1) \
+                    if epm is not None else torch.LongTensor([eo.size(1)] * eo.size(0))
+                encoder_out["encoder_out"][i], lengths = self.length_adaptor(eo, lengths.to(eo.device))
+                encoder_out["encoder_padding_mask"][i] = lengths_to_padding_mask(lengths)
         return encoder_out
-
-    def add_coupling_layers(self, cfg: S2TCouplingLayersConfig) -> None:
-        self.coupling_layers = nn.Linear(cfg.in_dim, cfg.out_dim)
-
-    def load_state_dict(self, state_dict, strict=True):
-        # Trick to avoid errors when coupling layers are not present in state_dict
-        for n, p in self.named_parameters():
-            if n.startswith('coupling_layers') and n not in state_dict.keys():
-                state_dict[n] = p.data
-        super().load_state_dict(state_dict, strict=strict)
 
 
 class PretrainedWav2VecBaseEncoder(S2TPretrainedEncoder):
@@ -207,6 +290,16 @@ class PretrainedWav2VecBaseEncoder(S2TPretrainedEncoder):
 
     def __init__(self, cfg: S2TPretrainedEncoderConfig):
         super().__init__(cfg)
+
+    @classmethod
+    def update_pre_args(cls, cfg: S2TPretrainedComponentConfig) -> None:
+        super().update_pre_args(cfg)
+        cfg.pre_args.model.final_dropout = cfg.dropout
+        cfg.pre_args.model.w2v_args.model.dropout = cfg.dropout
+        cfg.pre_args.model.w2v_args.model.attention_dropout = cfg.attention_dropout
+        cfg.pre_args.model.w2v_args.model.activation_dropout = cfg.activation_dropout
+        cfg.pre_args.model.w2v_args.model.dropout_input = cfg.dropout
+        cfg.pre_args.model.w2v_args.model.encoder_layerdrop = cfg.layerdrop
 
     @classmethod
     def build(cls, cfg: S2TPretrainedEncoderConfig) -> 'PretrainedWav2VecBaseEncoder':
@@ -257,7 +350,7 @@ class PretrainedWav2VecBaseEncoder(S2TPretrainedEncoder):
                 continue                                    # This layers are not used
             new_state_dict[k] = v
 
-        super().load_state_dict(new_state_dict, strict=strict)
+        return super().load_state_dict(new_state_dict, strict=strict)
 
     def pre_forward(self, src_tokens, src_lengths, **kwargs):
         encoder_in = super().pre_forward(src_tokens, src_lengths, **kwargs)
@@ -344,7 +437,12 @@ class S2TPretrainedDecoder(FairseqDecoder, S2TPretrainedComponent):
             raise ValueError(f"Unknown decoder name: {name}")
 
     @classmethod
+    def update_pre_args(cls, cfg: S2TPretrainedDecoderConfig) -> None:
+        return S2TPretrainedComponent.update_pre_args(cfg)
+
+    @classmethod
     def build(cls, cfg: S2TPretrainedDecoderConfig, tgt_dict: Dictionary) -> 'S2TPretrainedDecoder':
+        cls.update_pre_args(cfg)
         return cls(cfg, tgt_dict)
 
 
@@ -356,13 +454,26 @@ class PretrainedBartDecoder(S2TPretrainedDecoder, TransformerDecoder):
         TransformerDecoder.__init__(self, cfg.pre_args.model, tgt_dict, embed_tokens)
 
     @classmethod
+    def update_pre_args(cls, cfg: S2TPretrainedComponentConfig) -> None:
+        super().update_pre_args(cfg)
+        cfg.pre_args.model.layerdrop = cfg.layerdrop
+
+    @classmethod
     def build(cls, cfg: S2TPretrainedDecoderConfig, tgt_dict: Dictionary) -> 'S2TPretrainedDecoder':
+        cls.update_pre_args(cfg)
         embed_tokens = TransformerModelBase.build_embedding(
             cfg.pre_args.model,
             tgt_dict,
             cfg.pre_args.model.decoder_embed_dim
         )
-        return cls(cfg, tgt_dict, embed_tokens)
+        decoder = cls(cfg, tgt_dict, embed_tokens)
+
+        # XXX: Put this in S2TPretrainedDecoder class in the future
+        if cfg.cross_attention_dropout != cfg.attention_dropout:
+            for l in decoder.layers:
+                l.encoder_attn.dropout_module.p = cfg.cross_attention_dropout
+
+        return decoder
 
     def load_state_dict(self, state_model, strict=True):
         new_state_dict = {}
@@ -377,4 +488,4 @@ class PretrainedBartDecoder(S2TPretrainedDecoder, TransformerDecoder):
             new_state_dict["output_projection.weight"] = \
                 new_state_dict["embed_tokens.weight"]
 
-        S2TPretrainedDecoder.load_state_dict(self, new_state_dict, strict=strict)
+        return S2TPretrainedDecoder.load_state_dict(self, new_state_dict, strict=strict)
