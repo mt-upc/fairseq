@@ -1,6 +1,5 @@
 import re
 import logging
-from copy import deepcopy
 from dataclasses import dataclass, field
 from omegaconf import II, DictConfig
 from typing import Any, Optional, Dict, List, Type
