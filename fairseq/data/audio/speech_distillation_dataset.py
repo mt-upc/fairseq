@@ -35,8 +35,6 @@ class SpeechDistillationDataset(BaseWrapperDataset):
 
     def collater(self, samples: list[SpeechToTextDatasetItem]) -> dict:
         
-        print("KD collater")
-
         collater_out = self.dataset.collater(samples, return_order=True)
 
         topk_indices = [example.teacher_output["topk_indices"] for example in samples]

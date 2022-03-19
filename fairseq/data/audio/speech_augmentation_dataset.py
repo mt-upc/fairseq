@@ -53,11 +53,7 @@ class SpeechAugmentationDataset(BaseWrapperDataset):
             self.avai_effects.append("echo")
 
     def __getitem__(self, index: int) -> SpeechToTextDatasetItem:
-        
-        print("DA getitem")
-        
         example = self.dataset.__getitem__(index)
-        print(torch.std_mean(example.source))
         
         # apply effects or keep the original audiowave
         if np.random.rand() < self.p_augm:
