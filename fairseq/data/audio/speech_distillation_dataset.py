@@ -3,6 +3,7 @@ from fairseq.data.audio.speech_to_text_dataset import (
     SpeechToTextDataset,
     SpeechToTextDatasetItem,
 )
+from typing import List, Dict
 import torch
 from pathlib import Path
 import torch.nn.functional as F
@@ -33,10 +34,8 @@ class SpeechDistillationDataset(BaseWrapperDataset):
 
         return example
 
-    def collater(self, samples: list[SpeechToTextDatasetItem]) -> dict:
+    def collater(self, samples: List[SpeechToTextDatasetItem]) -> Dict:
         
-        print("KD collater")
-
         collater_out = self.dataset.collater(samples, return_order=True)
 
         topk_indices = [example.teacher_output["topk_indices"] for example in samples]
