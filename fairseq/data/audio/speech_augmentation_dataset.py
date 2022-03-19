@@ -6,7 +6,7 @@ from fairseq.data.audio.speech_to_text_dataset import (
     SpeechToTextDatasetItem,
 )
 import numpy as np
-from typing import Union
+from typing import Union, List, Dict
 import torch
 import torch.nn.functional as F
 
@@ -19,7 +19,7 @@ class SpeechAugmentationDataset(BaseWrapperDataset):
     def __init__(
         self,
         dataset: SpeechToTextDataset,
-        effects_info: dict[str, Union[list, dict]],
+        effects_info: Dict[str, Union[List, Dict]],
         p_augm: float,
         max_src_len: int
     ) -> None:       
