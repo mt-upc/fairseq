@@ -27,6 +27,7 @@ from fairseq.models.wav2vec import (
     Wav2Vec2Config,
     Wav2Vec2AsrConfig,
 )
+from fairseq.models.wav2vec.wav2vec2 import MASKING_DISTRIBUTION_CHOICES
 from fairseq.models.hubert import (
     HubertEncoder,
     HubertConfig,
@@ -69,6 +70,61 @@ class S2TLengthAdaptorConfig(FairseqDataclass):
 
 
 @dataclass
+class W2VTimeChannelMaskingConfig(FairseqDataclass):
+    length: int = field(
+        default=10, metadata={"help": "length of the mask"}
+    )
+    prob: float = field(
+        default=0.0,
+        metadata={"help": "probability of masking a token/feature"}
+    )
+    selection: MASKING_DISTRIBUTION_CHOICES = field(
+        default="static", metadata={"help": "how to choose masks"}
+    )
+    other: float = field(
+        default=0,
+        metadata={
+            "help": "secondary mask argument (used for more complex distributions), "
+            "see help in compute_mask_indices"
+        },
+    )
+    no_overlap: bool = field(
+        default=False, metadata={"help": "whether to allow masks to overlap"}
+    )
+    min_space: Optional[int] = field(
+        default=1,
+        metadata={"help": "min space between spans (if no overlap is enabled)"},
+    )
+
+
+@dataclass
+class W2VMaskingConfig(FairseqDataclass):
+    apply: bool = field(
+        default=False, metadata={"help": "apply masking during fine-tuning"}
+    )
+    time: W2VTimeChannelMaskingConfig = field(
+        default_factory=lambda: W2VTimeChannelMaskingConfig('time'),
+        metadata={"help": "time masking configuration"},
+    )
+    channels: W2VTimeChannelMaskingConfig = field(
+        default_factory=lambda: W2VTimeChannelMaskingConfig('channel'),
+        metadata={"help": "channel masking configuration"},
+    )
+    require_same_masks: bool = field(
+        default=True,
+        metadata={
+            "help": "whether to number of masked timesteps must be the same across all "
+            "examples in a batch"
+        },
+    )
+    dropout: float = field(
+        default=0.0,
+        metadata={"help": "percent of masks to unmask for each sample"},
+    )
+    channel_before: bool = False
+
+
+@dataclass
 class S2TPretrainedComponentConfig(FairseqDataclass):
     path: Optional[str] = field(
         default=None,
@@ -105,6 +161,10 @@ class S2TPretrainedEncoderConfig(S2TPretrainedComponentConfig):
     length_adaptor: Optional[S2TLengthAdaptorConfig] = field(
         default=None,
         metadata={"help": "length adaptor configuration"},
+    )
+    masking: W2VMaskingConfig = field(
+        default_factory=lambda: W2VMaskingConfig(),
+        metadata={"help": "masking configuration for wav2vec(-ish) encoders"},
     )
 
 
@@ -300,6 +360,24 @@ class PretrainedWav2VecBaseEncoder(S2TPretrainedEncoder):
         cfg.pre_args.model.w2v_args.model.activation_dropout = cfg.activation_dropout
         cfg.pre_args.model.w2v_args.model.dropout_input = cfg.dropout
         cfg.pre_args.model.w2v_args.model.encoder_layerdrop = cfg.layerdrop
+
+        cfg.pre_args.model.apply_mask = cfg.masking.apply
+        cfg.pre_args.model.w2v_args.model.mask_length = cfg.masking.time.length
+        cfg.pre_args.model.w2v_args.model.mask_channel_length = cfg.masking.channels.length
+        cfg.pre_args.model.w2v_args.model.mask_prob = cfg.masking.time.prob
+        cfg.pre_args.model.w2v_args.model.mask_channel_prob = cfg.masking.channels.prob
+        cfg.pre_args.model.w2v_args.model.mask_selection = cfg.masking.time.selection
+        cfg.pre_args.model.w2v_args.model.mask_channel_selection = cfg.masking.channels.selection
+        cfg.pre_args.model.w2v_args.model.mask_other = cfg.masking.time.other
+        cfg.pre_args.model.w2v_args.model.mask_channel_other = cfg.masking.channels.other
+        cfg.pre_args.model.w2v_args.model.no_mask_overlap = cfg.masking.time.no_overlap
+        cfg.pre_args.model.w2v_args.model.no_mask_channel_overlap = cfg.masking.channels.no_overlap
+        cfg.pre_args.model.w2v_args.model.mask_min_space = cfg.masking.time.min_space
+        cfg.pre_args.model.w2v_args.model.mask_channel_min_space = cfg.masking.channels.min_space
+        cfg.pre_args.model.w2v_args.model.require_same_masks = cfg.masking.require_same_masks
+        cfg.pre_args.model.w2v_args.model.mask_dropout = cfg.masking.dropout
+        cfg.pre_args.model.w2v_args.model.mask_channel_before = cfg.masking.channel_before
+
 
     @classmethod
     def build(cls, cfg: S2TPretrainedEncoderConfig) -> 'PretrainedWav2VecBaseEncoder':
