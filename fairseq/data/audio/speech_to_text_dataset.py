@@ -561,11 +561,9 @@ class SpeechToTextDatasetCreator(object):
                 ]
             # normal subsampling based on given ratios
             else:
-                datasets = [
-                    SubsampleDataset(d, r)
-                    for r, d in zip(sampling_ratios, datasets)
-                ]
-                for d, s in zip(datasets, splits.split(",")):
-                    d.split = s
-
+                for d, r, s in zip(datasets, sampling_ratios, splits.split(",")):
+                    if r < 1:
+                        d = SubsampleDataset(d, r)
+                        d.split = s
+                        
         return ConcatDataset(datasets) if len(datasets) > 1 else datasets[0]
