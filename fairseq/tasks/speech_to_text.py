@@ -171,7 +171,6 @@ class SpeechToTextTask(FairseqTask):
             }
         }
         self.sampling_ratios = list(map(float, cfg.sampling_ratios.split(",")))
-        self.sampling_ratios = [0.999999999 if r==1 else r for r in self.sampling_ratios]
 
     def _get_speaker_to_id(self):
         speaker_to_id = None
@@ -193,9 +192,9 @@ class SpeechToTextTask(FairseqTask):
             f"dictionary size ({data_cfg.vocab_filename}): " f"{len(tgt_dict):,}"
         )
 
-        # if getattr(cfg, "train_subset", None) is not None:
-        #     if not all(s.startswith("train") for s in cfg.train_subset.split(",")):
-        #         raise ValueError('Train splits should be named like "train*".')
+        if getattr(cfg, "train_subset", None) is not None:
+            if not all(s.startswith("train") for s in cfg.train_subset.split(",")):
+                raise ValueError('Train splits should be named like "train*".')
 
         if cfg.eval_wer:
             if cfg.eval_wer_config.wer_tokenizer == "none":
@@ -224,8 +223,7 @@ class SpeechToTextTask(FairseqTask):
         return criterions.build_criterion(cfg, self)
 
     def load_dataset(self, split, epoch=1, **kwargs):
-        # TODO: make sure all the train sets start with train
-        is_train_split = split.startswith("train") or "covost" in split or "europarl" in split
+        is_train_split = split.startswith("train")
         self.datasets[split] = SpeechToTextDatasetCreator.from_tsv(
             self.cfg.data,
             self.data_cfg,
