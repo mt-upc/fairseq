@@ -373,10 +373,13 @@ class PretrainedWav2VecBaseEncoder(S2TPretrainedEncoder):
         cfg.pre_args.model.w2v_args.model.no_mask_channel_overlap = cfg.masking.channels.no_overlap
         cfg.pre_args.model.w2v_args.model.mask_min_space = cfg.masking.time.min_space
         cfg.pre_args.model.w2v_args.model.mask_channel_min_space = cfg.masking.channels.min_space
-        cfg.pre_args.model.w2v_args.model.require_same_masks = cfg.masking.require_same_masks
-        cfg.pre_args.model.w2v_args.model.mask_dropout = cfg.masking.dropout
-        cfg.pre_args.model.w2v_args.model.mask_channel_before = cfg.masking.channel_before
-
+        
+        try:
+            cfg.pre_args.model.w2v_args.model.require_same_masks = cfg.masking.require_same_masks
+            cfg.pre_args.model.w2v_args.model.mask_dropout = cfg.masking.dropout
+            cfg.pre_args.model.w2v_args.model.mask_channel_before = cfg.masking.channel_before
+        except:
+            pass
 
     @classmethod
     def build(cls, cfg: S2TPretrainedEncoderConfig) -> 'PretrainedWav2VecBaseEncoder':
