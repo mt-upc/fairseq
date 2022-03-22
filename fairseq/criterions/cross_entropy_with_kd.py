@@ -159,12 +159,11 @@ class CrossEntropyWithKDCriterion(FairseqCriterion):
         metrics.log_scalar(
             "loss", loss_sum / sample_size / math.log(2), sample_size, round=3
         )
-        nll_loss = nll_loss_sum / sample_size / math.log(2)
         metrics.log_scalar(
-            "nll_loss", nll_loss, sample_size, round=3
+            "nll_loss",  nll_loss_sum / ntokens / math.log(2), round=3
         )
         metrics.log_scalar(
-            "truth_loss", nll_loss, sample_size, round=3,
+            "truth_loss", nll_loss_sum / sample_size / math.log(2), sample_size, round=3,
         )
         metrics.log_scalar(
             "teacher_loss",
@@ -173,7 +172,7 @@ class CrossEntropyWithKDCriterion(FairseqCriterion):
             round=3,
         )
         metrics.log_derived(
-            "ppl", lambda meters: utils.get_perplexity(meters["loss"].avg)
+            "ppl", lambda meters: utils.get_perplexity(meters["nll_loss"].avg)
         )
         total = utils.item(sum(log.get("total", 0) for log in logging_outputs))
         if total > 0:
