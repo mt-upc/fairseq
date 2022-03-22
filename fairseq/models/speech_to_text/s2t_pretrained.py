@@ -383,6 +383,7 @@ class PretrainedWav2VecBaseEncoder(S2TPretrainedEncoder):
         cfg.pre_args.model.w2v_args.model.no_mask_channel_overlap = cfg.masking.channels.no_overlap
         cfg.pre_args.model.w2v_args.model.mask_min_space = cfg.masking.time.min_space
         cfg.pre_args.model.w2v_args.model.mask_channel_min_space = cfg.masking.channels.min_space
+        cfg.pre_args.model.freeze_finetune_updates = 0
         
         try:
             cfg.pre_args.model.w2v_args.model.require_same_masks = cfg.masking.require_same_masks
