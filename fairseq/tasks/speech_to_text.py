@@ -66,16 +66,8 @@ class DataAugmentationConfig(FairseqDataclass):
 @dataclass
 class KnowledgeDistillationConfig(FairseqDataclass):
     path: str = field(
-        default="1",
+        default="",
         metadata={"help": "path to teacher outputs: ${path}/${split}/*.pt"}
-    )
-    loss_lambda: float = field(
-        default=0,
-        metadata={"help": "The weight of the KD criterion. 0 means that KD is not active"}
-    )
-    temperature: float = field(
-        default=1,
-        metadata={"help": "Temperature to normalize the distributions of student and teacher."}
     )
 
 @dataclass
@@ -171,6 +163,8 @@ class SpeechToTextTask(FairseqTask):
             }
         } if cfg.data_augmentation is not None and cfg.data_augmentation.p_augm > 0 else None
         self.sampling_ratios = list(map(float, cfg.sampling_ratios.split(",")))
+        
+        self.use_kd = cfg.knowledge_distillation is not None and cfg.knowledge_distillation != ""
 
     def _get_speaker_to_id(self):
         speaker_to_id = None
@@ -240,7 +234,7 @@ class SpeechToTextTask(FairseqTask):
         )
         
         if is_train_split:
-            if self.cfg.knowledge_distillation.loss_lambda > 0:
+            if self.use_kd > 0:
                 self.datasets[split] = SpeechDistillationDataset(
                     self.datasets[split],
                     self.cfg.knowledge_distillation.path,
