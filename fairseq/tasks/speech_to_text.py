@@ -317,6 +317,9 @@ class SpeechToTextTask(FairseqTask):
                 metrics.log_scalar(s.cfg._name, round(s.score(), 2))
                 if safe_hasattr(s, "reset"):
                     s.reset()
+                else:
+                    s.ref = []
+                    s.pred = []
 
     def build_generator(
         self,
