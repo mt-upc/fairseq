@@ -169,7 +169,7 @@ class SpeechToTextTask(FairseqTask):
                 "delay": list(map(int, cfg.data_augmentation.echo_delay.split(","))),
                 "decay": list(map(float, cfg.data_augmentation.echo_decay.split(",")))
             }
-        }
+        } if cfg.data_augmentation is not None and cfg.data_augmentation.p_augm > 0 else None
         self.sampling_ratios = list(map(float, cfg.sampling_ratios.split(",")))
 
     def _get_speaker_to_id(self):
@@ -236,7 +236,7 @@ class SpeechToTextTask(FairseqTask):
             seed=self.cfg.seed,
             speaker_to_id=self.speaker_to_id,
             sampling_ratios=self.sampling_ratios,
-            no_standardize_audio=is_train_split and self.cfg.data_augmentation.p_augm > 0
+            no_standardize_audio=is_train_split and self.effects_info is not None
         )
         
         if is_train_split:
@@ -247,7 +247,10 @@ class SpeechToTextTask(FairseqTask):
                     pad_idx=self.tgt_dict.pad()
                 )
             
-            if self.cfg.data_augmentation.p_augm > 0:
+            if self.effects_info is not None:
+                logger.info(f"Using data augmentation on '{split}' with probability "
+                            f"of {self.cfg.data_augmentation.p_augm} and the following "
+                            f"configuration: {self.effects_info}")
                 self.datasets[split] = SpeechAugmentationDataset(
                     self.datasets[split],
                     effects_info=self.effects_info,
