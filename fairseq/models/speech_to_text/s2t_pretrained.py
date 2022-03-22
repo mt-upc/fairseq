@@ -161,9 +161,19 @@ class S2TPretrainedEncoderConfig(S2TPretrainedComponentConfig):
         default=None,
         metadata={"help": "length adaptor configuration"},
     )
+
+    # Arguments for wav2vec(-ish) encoders
     masking: W2VMaskingConfig = field(
         default_factory=lambda: W2VMaskingConfig(),
         metadata={"help": "masking configuration for wav2vec(-ish) encoders"},
+    )
+    dropout_input: float = field(
+        default=0.0,
+        metadata={"help": "dropout to apply to the input (after feat extr)"},
+    )
+    final_dropout: float = field(
+        default=0.0,
+        metadata={"help": "dropout after transformer and before final projection"},
     )
 
 
@@ -353,11 +363,11 @@ class PretrainedWav2VecBaseEncoder(S2TPretrainedEncoder):
     @classmethod
     def update_pre_args(cls, cfg: S2TPretrainedComponentConfig) -> None:
         super().update_pre_args(cfg)
-        cfg.pre_args.model.final_dropout = cfg.dropout
+        cfg.pre_args.model.final_dropout = cfg.final_dropout
         cfg.pre_args.model.w2v_args.model.dropout = cfg.dropout
         cfg.pre_args.model.w2v_args.model.attention_dropout = cfg.attention_dropout
         cfg.pre_args.model.w2v_args.model.activation_dropout = cfg.activation_dropout
-        cfg.pre_args.model.w2v_args.model.dropout_input = cfg.dropout
+        cfg.pre_args.model.w2v_args.model.dropout_input = cfg.dropout_input
         cfg.pre_args.model.w2v_args.model.encoder_layerdrop = cfg.layerdrop
 
         cfg.pre_args.model.apply_mask = cfg.masking.apply
