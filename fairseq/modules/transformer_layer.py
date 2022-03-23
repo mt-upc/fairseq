@@ -466,6 +466,9 @@ class TransformerDecoderLayerBase(nn.Module):
         x = self.residual_connection(x, residual)
         if not self.normalize_before:
             x = self.self_attn_layer_norm(x)
+            
+        if hasattr(self, "self_attn_adapter"):
+            x = self.self_attn_adapter(residual, x) 
 
         if self.encoder_attn is not None and encoder_out is not None:
             residual = x
@@ -496,6 +499,9 @@ class TransformerDecoderLayerBase(nn.Module):
             x = self.residual_connection(x, residual)
             if not self.normalize_before:
                 x = self.encoder_attn_layer_norm(x)
+                
+            if hasattr(self, "cross_attn_adapter"):
+                x = self.cross_attn_adapter(residual, x) 
 
         residual = x
         if self.normalize_before:
@@ -512,6 +518,10 @@ class TransformerDecoderLayerBase(nn.Module):
         x = self.residual_connection(x, residual)
         if not self.normalize_before:
             x = self.final_layer_norm(x)
+            
+        if hasattr(self, "ffn_adapter"):
+            x = self.ffn_adapter(residual, x)
+            
         if self.onnx_trace and incremental_state is not None:
             saved_state = self.self_attn._get_input_buffer(incremental_state)
             assert saved_state is not None
