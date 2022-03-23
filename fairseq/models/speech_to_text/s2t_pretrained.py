@@ -36,6 +36,7 @@ from fairseq.models.transformer import (
     TransformerModelBase,
     TransformerDecoder,
 )
+from fairseq.modules.adapter import ScaledParallelAdapter
 from fairseq.models.speech_to_text import Conv1dSubsampler
 from fairseq.tasks import FairseqTask
 from fairseq.tasks.audio_pretraining import AudioPretrainingConfig
@@ -46,6 +47,31 @@ from fairseq.utils import safe_hasattr
 
 logger = logging.getLogger(__name__)
 
+
+@dataclass
+class AdaptersConfig(FairseqDataclass):
+    adapter_dim: int = field(
+        default=256, metadata={"help": "Bottleneck dimension for the Scaled Parallel Adaoter"}
+    )
+    adapter_scale: float = field(
+        default=1, metadata={"help": "Scaling factor of the parallel adapter output"}
+    )
+    apply_at_self_attn: bool = field(
+        default=False,
+        metadata={"help":
+            "Apply Prefix Tuning at the Self-Attention sublayers of this component"}
+    )
+    apply_at_cross_attn: bool = field(
+        default=False,
+        metadata={"help":
+            "Apply Prefix Tuning at the Cross-Attention sublayers of this component"}
+    )
+    apply_at_ffn: bool = field(
+        default=False,
+        metadata={"help":
+            "Apply Scaled Parallel Adapter at the Feed-forward sublayers of this component"}
+    )
+    
 
 @dataclass
 class S2TLengthAdaptorConfig(FairseqDataclass):
@@ -175,6 +201,10 @@ class S2TPretrainedEncoderConfig(S2TPretrainedComponentConfig):
         default=0.0,
         metadata={"help": "dropout after transformer and before final projection"},
     )
+    adapters: Optional[AdaptersConfig] = field(
+        default=None,
+        metadata={"help": "apply adapters to each layer"}
+    )
 
 
 @dataclass
@@ -183,6 +213,11 @@ class S2TPretrainedDecoderConfig(S2TPretrainedComponentConfig):
         default=II('model.decoder.attention_dropout'),
         metadata={"help": "dropout probability for cross-attention weights"},
     )
+    adapters: Optional[AdaptersConfig] = field(
+        default=None,
+        metadata={"help": "apply adapters to each layer"}
+    )
+
 
 
 @dataclass
@@ -258,6 +293,9 @@ class S2TPretrainedComponent:
                 logger.info(f"Loading weights from pretrained {component_type}")
                 component.load_weights(state)
                 component.freeze_layers()
+                
+        if safe_hasattr(cfg, "adapters"):
+            component.add_adapters(cfg.adapters)
 
         return component
 
@@ -303,6 +341,8 @@ class S2TPretrainedEncoder(FairseqEncoder, S2TPretrainedComponent):
     def __init__(self, cfg: S2TPretrainedEncoderConfig):
         FairseqEncoder.__init__(self, dictionary=None)
         S2TPretrainedComponent.__init__(self, cfg)
+        
+        self.embed_dim = cfg["pre_args"]["model"]["w2v_args"]["model"].encoder_embed_dim
 
     @classmethod
     def get_class(cls, cfg: S2TPretrainedEncoderConfig) -> Type['S2TPretrainedEncoder']:
@@ -352,7 +392,19 @@ class S2TPretrainedEncoder(FairseqEncoder, S2TPretrainedComponent):
                 encoder_out["encoder_out"][i], lengths = self.length_adaptor(eo, lengths.to(eo.device))
                 encoder_out["encoder_padding_mask"][i] = lengths_to_padding_mask(lengths)
         return encoder_out
-
+    
+    def add_adapters(self, cfg: AdaptersConfig) -> None:
+        def make_adapter(self, cfg):
+            return ScaledParallelAdapter(
+                    embed_dim=self.embed_dim,
+                    bottleneck_dim=cfg.adapter_dim,
+                    scaling_factor=cfg.adapter_scale
+                )
+        for transformer_layer in self.w2v_model.encoder.layers:
+            if cfg.apply_at_self_attn:
+                transformer_layer.self_attn_adapter = make_adapter(self, cfg)
+            if cfg.apply_at_ffn:
+                transformer_layer.ffn_adapter = make_adapter(self, cfg)
 
 class PretrainedWav2VecBaseEncoder(S2TPretrainedEncoder):
     """ Base class for pretrained wav2vec(-ish) encoders, including HuBERT """
@@ -518,6 +570,8 @@ class S2TPretrainedDecoder(FairseqDecoder, S2TPretrainedComponent):
     def __init__(self, cfg: S2TPretrainedDecoderConfig, tgt_dict: Dictionary):
         FairseqDecoder.__init__(self, dictionary=tgt_dict)
         S2TPretrainedComponent.__init__(self, cfg)
+        
+        self.embed_dim = cfg["pre_args"]["model"].decoder_embed_dim
 
     @classmethod
     def get_class(cls, cfg: S2TPretrainedDecoderConfig) -> Type['S2TPretrainedEncoder']:
@@ -535,7 +589,21 @@ class S2TPretrainedDecoder(FairseqDecoder, S2TPretrainedComponent):
     def build(cls, cfg: S2TPretrainedDecoderConfig, tgt_dict: Dictionary) -> 'S2TPretrainedDecoder':
         cls.update_pre_args(cfg)
         return cls(cfg, tgt_dict)
-
+    
+    def add_adapters(self, cfg: AdaptersConfig) -> None:       
+        def make_adapter(self, cfg):
+            return ScaledParallelAdapter(
+                    embed_dim=self.embed_dim,
+                    bottleneck_dim=cfg.adapter_dim,
+                    scaling_factor=cfg.adapter_scale
+                )
+        for transformer_layer in self.layers:
+            if cfg.apply_at_self_attn:
+                transformer_layer.self_attn_adapter = make_adapter(self, cfg)
+            if cfg.apply_at_self_attn:
+                transformer_layer.cross_attn_adapter = make_adapter(self, cfg)
+            if cfg.apply_at_ffn:
+                transformer_layer.ffn_adapter = make_adapter(self, cfg)
 
 class PretrainedBartDecoder(S2TPretrainedDecoder, TransformerDecoder):
     """ Pretrained BART decoder """

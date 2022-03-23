@@ -1245,6 +1245,9 @@ class TransformerSentenceEncoderLayer(nn.Module):
             )
             x = self.dropout1(x)
             x = residual + x
+            
+            if hasattr(self, "self_attn_adapter"):
+                x = self.self_attn_adapter(residual, x)          
 
             residual = x
             x = self.final_layer_norm(x)
@@ -1256,6 +1259,10 @@ class TransformerSentenceEncoderLayer(nn.Module):
 
             x = self.dropout3(x)
             x = residual + x
+            
+            if hasattr(self, "ffn_adapter"):
+                x = self.ffn_adapter(residual, x)
+            
         else:
             x, attn = self.self_attn(
                 query=x,
@@ -1269,6 +1276,9 @@ class TransformerSentenceEncoderLayer(nn.Module):
             x = residual + x
 
             x = self.self_attn_layer_norm(x)
+            
+            if hasattr(self, "self_attn_adapter"):
+                x = self.self_attn_adapter(residual, x)
 
             residual = x
             x = self.activation_fn(self.fc1(x))
@@ -1280,5 +1290,8 @@ class TransformerSentenceEncoderLayer(nn.Module):
             x = self.dropout3(x)
             x = residual + x
             x = self.final_layer_norm(x)
+            
+            if hasattr(self, "ffn_adapter"):
+                x = self.ffn_adapter(residual, x)
 
         return x, (attn, layer_result)
