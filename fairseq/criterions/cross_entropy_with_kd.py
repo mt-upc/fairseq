@@ -48,13 +48,6 @@ class CrossEntropyWithKDCriterion(FairseqCriterion):
     def __init__(self, cfg, task):
         super().__init__(task)
         self.cfg = cfg
-        
-        # Lambda ranges between 0.0 and 1.0. 0.0 means that we only use the ground
-        # truth labels (ie. it is the same as the normal cross entropy); 1.0 means
-        # that only the teacher output is taken in account.
-
-        # TODO: if lambda==0 do not use this criterion
-        # use the label_smoothed_cross_entropy instead
 
     @classmethod
     def build_criterion(cls, cfg: CrossEntropyWithKDCriterionConfig, task):
@@ -75,32 +68,36 @@ class CrossEntropyWithKDCriterion(FairseqCriterion):
         net_output = model(**sample["net_input"])
 
         # KD from the teacher
-        net_output_scaled = (net_output[0] / self.cfg.teacher_temperature, net_output[1])
-        lprobs_scaled = model.get_normalized_probs(net_output_scaled, log_probs=True)
-        lprobs_scaled = lprobs_scaled.view(-1, lprobs_scaled.size(-1))
-        
-        teacher_idxs = sample["teacher_output"]["topk_indices"][:, self.cfg.teacher_ignore_prefix_size:]
-        teacher_outs = sample["teacher_output"]["topk_outputs"][:, self.cfg.teacher_ignore_prefix_size:]
+        if "teacher_output" in sample.keys():
+            net_output_scaled = (net_output[0] / self.cfg.teacher_temperature, net_output[1])
+            lprobs_scaled = model.get_normalized_probs(net_output_scaled, log_probs=True)
+            lprobs_scaled = lprobs_scaled.view(-1, lprobs_scaled.size(-1))
+            
+            teacher_idxs = sample["teacher_output"]["topk_indices"][:, self.cfg.teacher_ignore_prefix_size:]
+            teacher_outs = sample["teacher_output"]["topk_outputs"][:, self.cfg.teacher_ignore_prefix_size:]
 
-        teacher_probs = F.softmax(teacher_outs / self.cfg.teacher_temperature, dim=-1)
-        teacher_idxs = teacher_idxs.view(-1, teacher_idxs.shape[-1])
-        teacher_probs = teacher_probs.view(-1, teacher_probs.shape[-1])
+            teacher_probs = F.softmax(teacher_outs / self.cfg.teacher_temperature, dim=-1)
+            teacher_idxs = teacher_idxs.view(-1, teacher_idxs.shape[-1])
+            teacher_probs = teacher_probs.view(-1, teacher_probs.shape[-1])
 
-        lprobs_scaled_selected = lprobs_scaled.gather(dim=-1, index=teacher_idxs.long())
-        teacher_loss = -lprobs_scaled_selected * teacher_probs
+            lprobs_scaled_selected = lprobs_scaled.gather(dim=-1, index=teacher_idxs.long())
+            teacher_loss = -lprobs_scaled_selected * teacher_probs
 
-        # Ignore paddings
-        # mask = target != self.padding_idx
-        mask = teacher_idxs != self.padding_idx
-        teacher_loss = teacher_loss * mask.type(teacher_loss.dtype)
-        teacher_loss = teacher_loss.sum(dim=-1)
+            # Ignore paddings
+            # mask = target != self.padding_idx
+            mask = teacher_idxs != self.padding_idx
+            teacher_loss = teacher_loss * mask.type(teacher_loss.dtype)
+            teacher_loss = teacher_loss.sum(dim=-1)
+        else:
+            # dev or test set
+            teacher_loss = 0
         
         if self.cfg.teacher_lambda == 1.0:
             truth_loss = 0.0
         else:
             truth_loss = self.get_nll_loss(model, net_output, sample)
 
-        if isinstance(truth_loss, torch.Tensor):
+        if isinstance(truth_loss, torch.Tensor) and isinstance(truth_loss, torch.Tensor):
             assert teacher_loss.shape == truth_loss.shape
         loss = (1.0 - self.cfg.teacher_lambda) * truth_loss + self.cfg.teacher_lambda * teacher_loss
 
