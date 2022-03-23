@@ -13,6 +13,7 @@ import math
 import os
 import sys
 from typing import Any, Callable, Dict, List, Optional, Tuple
+import wandb
 
 # We need to setup root logger before importing any fairseq libraries.
 logging.basicConfig(
@@ -203,6 +204,11 @@ def main(cfg: FairseqConfig) -> None:
         )
     train_meter.stop()
     logger.info("done training in {:.1f} seconds".format(train_meter.sum))
+    
+    try:
+        wandb.finish()
+    except:
+        pass
 
     # ioPath implementation to wait for all asynchronous file writes to complete.
     if cfg.checkpoint.write_checkpoints_asynchronously:
