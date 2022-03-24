@@ -66,11 +66,14 @@ class CrossEntropyWithKDCriterion(FairseqCriterion):
         3) logging outputs to display while training
         """
         net_output = model(**sample["net_input"])
-
+        
         # KD from the teacher
         if "teacher_output" in sample.keys():
             net_output_scaled = (net_output[0] / self.cfg.teacher_temperature, net_output[1])
             lprobs_scaled = model.get_normalized_probs(net_output_scaled, log_probs=True)
+            
+            if self.cfg.ignore_prefix_size > 0:
+                lprobs_scaled = lprobs_scaled[:, self.cfg.ignore_prefix_size:, :].contiguous()
             lprobs_scaled = lprobs_scaled.view(-1, lprobs_scaled.size(-1))
             
             teacher_idxs = sample["teacher_output"]["topk_indices"][:, self.cfg.teacher_ignore_prefix_size:]
