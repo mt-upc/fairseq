@@ -1235,6 +1235,10 @@ class TransformerSentenceEncoderLayer(nn.Module):
 
         if self.layer_norm_first:
             x = self.self_attn_layer_norm(x)
+            
+            if hasattr(self, "self_attn_adapter"):
+                input_to_adapter = x
+                
             x, attn = self.self_attn(
                 query=x,
                 key=x,
@@ -1243,26 +1247,31 @@ class TransformerSentenceEncoderLayer(nn.Module):
                 attn_mask=self_attn_mask,
                 need_weights=False,
             )
+
+            if hasattr(self, "self_attn_adapter"):
+                x = self.self_attn_adapter(residual, x)  
+                        
             x = self.dropout1(x)
             x = residual + x
             
-            if hasattr(self, "self_attn_adapter"):
-                x = self.self_attn_adapter(residual, x)          
-
             residual = x
             x = self.final_layer_norm(x)
+            
+            if hasattr(self, "ffn_adapter"):
+                input_to_adapter = x
+            
             x = self.activation_fn(self.fc1(x))
             x = self.dropout2(x)
             x = self.fc2(x)
+            
+            if hasattr(self, "ffn_adapter"):
+                x = self.ffn_adapter(input_to_adapter, x)
 
             layer_result = x
 
             x = self.dropout3(x)
             x = residual + x
-            
-            if hasattr(self, "ffn_adapter"):
-                x = self.ffn_adapter(residual, x)
-            
+
         else:
             x, attn = self.self_attn(
                 query=x,
@@ -1272,26 +1281,26 @@ class TransformerSentenceEncoderLayer(nn.Module):
                 need_weights=False,
             )
 
+            if hasattr(self, "self_attn_adapter"):
+                x = self.self_attn_adapter(residual, x)
+                
             x = self.dropout1(x)
             x = residual + x
 
             x = self.self_attn_layer_norm(x)
-            
-            if hasattr(self, "self_attn_adapter"):
-                x = self.self_attn_adapter(residual, x)
 
             residual = x
             x = self.activation_fn(self.fc1(x))
             x = self.dropout2(x)
             x = self.fc2(x)
 
+            if hasattr(self, "ffn_adapter"):
+                x = self.ffn_adapter(residual, x)
+                
             layer_result = x
 
             x = self.dropout3(x)
             x = residual + x
             x = self.final_layer_norm(x)
-            
-            if hasattr(self, "ffn_adapter"):
-                x = self.ffn_adapter(residual, x)
 
         return x, (attn, layer_result)

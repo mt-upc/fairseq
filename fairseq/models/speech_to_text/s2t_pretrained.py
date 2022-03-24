@@ -600,7 +600,7 @@ class S2TPretrainedDecoder(FairseqDecoder, S2TPretrainedComponent):
         for transformer_layer in self.layers:
             if cfg.apply_at_self_attn:
                 transformer_layer.self_attn_adapter = make_adapter(self, cfg)
-            if cfg.apply_at_self_attn:
+            if cfg.apply_at_cross_attn:
                 transformer_layer.cross_attn_adapter = make_adapter(self, cfg)
             if cfg.apply_at_ffn:
                 transformer_layer.ffn_adapter = make_adapter(self, cfg)

@@ -411,6 +411,10 @@ class TransformerDecoderLayerBase(nn.Module):
         residual = x
         if self.normalize_before:
             x = self.self_attn_layer_norm(x)
+            
+        if hasattr(self, "self_attn_adapter"):
+            input_to_adapter = x
+            
         if prev_self_attn_state is not None:
             prev_key, prev_value = prev_self_attn_state[:2]
             saved_state: Dict[str, Optional[Tensor]] = {
@@ -462,18 +466,23 @@ class TransformerDecoderLayerBase(nn.Module):
             x = x.reshape(tgt_len, bsz, self.embed_dim)
         if self.attn_ln is not None:
             x = self.attn_ln(x)
+            
+        if hasattr(self, "self_attn_adapter"):
+            x = self.self_attn_adapter(input_to_adapter, x)
+            
         x = self.dropout_module(x)
         x = self.residual_connection(x, residual)
         if not self.normalize_before:
             x = self.self_attn_layer_norm(x)
             
-        if hasattr(self, "self_attn_adapter"):
-            x = self.self_attn_adapter(residual, x) 
-
         if self.encoder_attn is not None and encoder_out is not None:
             residual = x
             if self.normalize_before:
                 x = self.encoder_attn_layer_norm(x)
+                
+            if hasattr(self, "cross_attn_adapter"):
+                input_to_adapter = x
+                
             if prev_attn_state is not None:
                 prev_key, prev_value = prev_attn_state[:2]
                 saved_state: Dict[str, Optional[Tensor]] = {
@@ -495,32 +504,38 @@ class TransformerDecoderLayerBase(nn.Module):
                 need_weights=need_attn or (not self.training and self.need_attn),
                 need_head_weights=need_head_weights,
             )
+            
+            if hasattr(self, "cross_attn_adapter"):
+                x = self.cross_attn_adapter(input_to_adapter, x) 
+                
             x = self.dropout_module(x)
             x = self.residual_connection(x, residual)
             if not self.normalize_before:
                 x = self.encoder_attn_layer_norm(x)
                 
-            if hasattr(self, "cross_attn_adapter"):
-                x = self.cross_attn_adapter(residual, x) 
 
         residual = x
         if self.normalize_before:
             x = self.final_layer_norm(x)
+            
+        if hasattr(self, "ffn_adapter"):
+            input_to_adapter = x
 
         x = self.activation_fn(self.fc1(x))
         x = self.activation_dropout_module(x)
         if self.ffn_layernorm is not None:
             x = self.ffn_layernorm(x)
         x = self.fc2(x)
+        
+        if hasattr(self, "ffn_adapter"):
+            x = self.ffn_adapter(input_to_adapter, x)
+        
         x = self.dropout_module(x)
         if self.w_resid is not None:
             residual = torch.mul(self.w_resid, residual)
         x = self.residual_connection(x, residual)
         if not self.normalize_before:
             x = self.final_layer_norm(x)
-            
-        if hasattr(self, "ffn_adapter"):
-            x = self.ffn_adapter(residual, x)
             
         if self.onnx_trace and incremental_state is not None:
             saved_state = self.self_attn._get_input_buffer(incremental_state)
