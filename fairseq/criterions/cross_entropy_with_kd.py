@@ -55,7 +55,7 @@ class CrossEntropyWithKDCriterion(FairseqCriterion):
             "Warning: teacher lambda is zero." \
             "It's better to use label-smoothed cross-entropy instead"
         assert cfg.teacher_lambda <= 1, \
-            "Warning: teacher weight cannot be larger than 1"
+            "Warning: teacher weight cannot be larger than 1"           
         return cls(cfg, task)
 
     def forward(self, model, sample, reduce=True):
@@ -80,13 +80,12 @@ class CrossEntropyWithKDCriterion(FairseqCriterion):
             teacher_idxs = teacher_idxs.view(-1, teacher_idxs.shape[-1])
             teacher_probs = teacher_probs.view(-1, teacher_probs.shape[-1])
 
-            lprobs_scaled_selected = lprobs_scaled.gather(dim=-1, index=teacher_idxs.long())
-            teacher_loss = -lprobs_scaled_selected * teacher_probs
+            lprobs_scaled = lprobs_scaled.gather(dim=-1, index=teacher_idxs.long()).contiguous()
+            teacher_loss = -lprobs_scaled * teacher_probs
 
             # Ignore paddings
-            # mask = target != self.padding_idx
-            mask = teacher_idxs != self.padding_idx
-            teacher_loss = teacher_loss * mask.type(teacher_loss.dtype)
+            teacher_mask = teacher_idxs.eq(self.padding_idx)
+            teacher_loss.masked_fill_(teacher_mask, 0.0)
             teacher_loss = teacher_loss.sum(dim=-1)
         else:
             # dev or test set
@@ -97,8 +96,8 @@ class CrossEntropyWithKDCriterion(FairseqCriterion):
         else:
             truth_loss = self.get_nll_loss(model, net_output, sample)
 
-        if isinstance(truth_loss, torch.Tensor) and isinstance(truth_loss, torch.Tensor):
-            assert teacher_loss.shape == truth_loss.shape
+        if isinstance(teacher_loss, torch.Tensor) and isinstance(truth_loss, torch.Tensor):
+            assert teacher_loss.shape == truth_loss.shape, (teacher_loss.shape, truth_loss.shape)
         loss = (1.0 - self.cfg.teacher_lambda) * truth_loss + self.cfg.teacher_lambda * teacher_loss
 
         sample_size = (
@@ -106,8 +105,9 @@ class CrossEntropyWithKDCriterion(FairseqCriterion):
         )
         if reduce:
             loss = loss.sum()
-            truth_loss = truth_loss.sum()
-            teacher_loss = teacher_loss.sum()
+            with torch.no_grad():
+                truth_loss = truth_loss.sum() if isinstance(truth_loss, torch.Tensor) else torch.tensor([0.])
+                teacher_loss = teacher_loss.sum() if isinstance(teacher_loss, torch.Tensor) else torch.tensor([0.])
         logging_output = {
             "loss": loss.data,
             "nll_loss": truth_loss.data,
@@ -127,31 +127,22 @@ class CrossEntropyWithKDCriterion(FairseqCriterion):
         target = model.get_targets(sample, net_output)
         if self.cfg.ignore_prefix_size > 0:
             # lprobs: B x T x C
-            lprobs = lprobs[:, self.cfg.ignore_prefix_size :, :].contiguous()
-            target = target[:, self.cfg.ignore_prefix_size :].contiguous()
-        truth_loss = F.nll_loss(
-            lprobs.view(-1, lprobs.size(-1)),
-            target.view(-1),
-            ignore_index=self.padding_idx,
-            reduction="none"
-        )
-        return truth_loss
+            lprobs = lprobs[:, self.cfg.ignore_prefix_size:, :].contiguous()
+            target = target[:, self.cfg.ignore_prefix_size:].unsqueeze(-1).contiguous()
+        truth_loss = -lprobs.gather(dim=-1, index=target)
+        pad_mask = target.eq(self.padding_idx)
+        truth_loss.masked_fill_(pad_mask, 0.0)
+        return truth_loss.view(-1)
 
 
     @classmethod
     def reduce_metrics(cls, logging_outputs):
         """Aggregate logging outputs from data parallel training."""
-        loss_sum = utils.item(sum(log.get("loss", 0) for log in logging_outputs))
-        nll_loss_sum = utils.item(
-            sum(log.get("nll_loss", 0) for log in logging_outputs)
-        )
-        teacher_loss_sum = utils.item(
-            sum(log.get("teacher_loss", 0) for log in logging_outputs)
-        )
-        ntokens = utils.item(sum(log.get("ntokens", 0) for log in logging_outputs))
-        sample_size = utils.item(
-            sum(log.get("sample_size", 0) for log in logging_outputs)
-        )
+        loss_sum = sum(log.get("loss", 0) for log in logging_outputs)
+        nll_loss_sum = sum(log.get("nll_loss", 0) for log in logging_outputs)
+        teacher_loss_sum = sum(log.get("teacher_loss", 0) for log in logging_outputs)
+        ntokens = sum(log.get("ntokens", 0) for log in logging_outputs)
+        sample_size = sum(log.get("sample_size", 0) for log in logging_outputs)
 
         metrics.log_scalar(
             "loss", loss_sum / sample_size / math.log(2), sample_size, round=3
