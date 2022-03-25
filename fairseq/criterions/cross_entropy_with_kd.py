@@ -32,6 +32,10 @@ class CrossEntropyWithKDCriterionConfig(FairseqDataclass):
         default=0,
         metadata={"help": "Ignore first N tokens"},
     )
+    force_calculate_nll: bool = field(
+        default=False,
+        metadata={"help": "To calculate nll loss even though lambda == 1"}
+    )
     report_accuracy: bool = field(
         default=False,
         metadata={"help": "report accuracy metric"},
@@ -106,6 +110,11 @@ class CrossEntropyWithKDCriterion(FairseqCriterion):
         sample_size = (
             sample["target"].size(0) if self.cfg.sentence_avg else sample["ntokens"]
         )
+        
+        if self.cfg.teacher_lambda == 1.0 and self.cfg.force_calculate_nll:
+            with torch.no_grad():
+                truth_loss = self.get_nll_loss(model, net_output, sample)
+            
         if reduce:
             loss = loss.sum()
             with torch.no_grad():
