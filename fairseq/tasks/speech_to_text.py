@@ -234,7 +234,7 @@ class SpeechToTextTask(FairseqTask):
         )
         
         if is_train_split:
-            if self.use_kd > 0:
+            if self.use_kd:
                 self.datasets[split] = SpeechDistillationDataset(
                     self.datasets[split],
                     self.cfg.knowledge_distillation.path,
