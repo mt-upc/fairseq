@@ -1,5 +1,13 @@
 # Multiformer
 
+Implementation of the paper "Multiformer: A Head-Configurable Transformer-Based Model for Direct Speech Translation"
+
+## Abstract
+
+*Transformer-based models have been achieving state-of-the-art results in several fields of Natural Language Processing. However, its direct application to speech tasks is not trivial. The nature of this sequences carries problems such as long sequence lengths and redundancy between adjacent tokens. Therefore, we believe that regular self-attention mechanism might not be well suited for it.*
+
+*Different approaches have been proposed to overcome this problems, such as the use of efficient attention mechanisms. However, the use of this methods usually comes with a cost, which is a performance reduction caused by information loss. In this study, we present the Multiformer, a Transformer-based model which allows the use of different attention mechanisms on each head. By doing this, the model is able to bias the self-attention towards the extraction of more diverse token interactions, and the information loss is reduced. Finally, we perform an analysis of the head contributions, and we observe that those architectures where all heads relevance is uniformly distributed obtain better results. Our results show that mixing attention patterns along the different heads and layers outperforms our baseline by up to 0.7 BLEU.*
+
 ## Installation
 
 
@@ -15,7 +23,7 @@ Set the environment variables:
 ```bash
 export FAIRSEQ_ROOT=...             # where you'll clone our Fairseq fork
 export CONTAINER=.../multiformer    # specify a path for the multiformer container
-export MUSTC_ROOT=                  # where must-c dataset is located
+export MUSTC_ROOT=...               # where must-c dataset is located
 export MKL_THREADING_LAYER=GNU      # To avoid errors with the container
 ```
 
@@ -71,7 +79,7 @@ fairseq-train ${MUSTC_ROOT}/en-${TGT} \
   --lr 1e-3 --lr-scheduler inverse_sqrt --warmup-updates 10000 --clip-norm 10.0 \
   --seed 1 --update-freq 10
 ```
-Where ${TGT} is the target lenguage, ${ASR_SAVE_DIR} the path where the ASR checkpoints will be stored and ${MULTIFORMER_ARCH} the Multiformer architecture to be trained.
+Where `${TGT}` is the target lenguage, `${ASR_SAVE_DIR}` the path where the ASR checkpoints will be stored and `${MULTIFORMER_ARCH}` the Multiformer architecture to be trained.
 
 **Training**
 
@@ -88,7 +96,7 @@ fairseq-train ${MUSTC_ROOT}/en-${TGT} \
   --warmup-updates 10000 --clip-norm 10.0 --seed 1 --update-freq 10 \
   --load-pretrained-encoder-from ${ASR_SAVE_DIR}/checkpoint_best.pt
 ```
-With ${ST_SAVE_DIR} as the path where the ST checkpoints will be stored.
+With `${ST_SAVE_DIR}` as the path where the ST checkpoints will be stored.
 
 ## Evaluation
 
@@ -103,7 +111,7 @@ python /home/usuaris/veu/gerard.muniesa/repositories/fairseq-multiformer/scripts
   --inputs ${ST_SAVE_DIR} --num-epoch-checkpoints 7 --checkpoint-upper-bound=${3_AFTER_BEST} \
   --output ${ST_SAVE_DIR}/avg_7_around_best.pt
 ```
-Where ${3_AFTER_BEST} is number of of the best checkpoint plus 3.
+Where `${3_AFTER_BEST}` is number of of the best checkpoint plus 3.
 
 **BLEU**
 
@@ -119,8 +127,8 @@ PYTHONIOENCODING=utf-8 fairseq-generate ${MUSTC_ROOT}/en-${TGT} \
   --log-format json >> ${OUTPUT_DIR}
 ```
 
-Where ${OUTPUT_DIR} is the path of the .txt file where the BLEU score will be written.
+Where `${OUTPUT_DIR}` is the path of the .txt file where the BLEU score will be written.
 
 ## Heads Contribution Analysis
 
-To perform heads analysis, use the "heads_contribution.ipynb" jupyter notebook.
+To perform the analysis of heads, use the [heads_contribution.ipynb](https://github.com/mt-upc/fairseq-internal/blob/multiformer/examples/multiformer/heads_contribution.ipynb) jupyter notebook.
