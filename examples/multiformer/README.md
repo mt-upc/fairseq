@@ -133,4 +133,4 @@ Where `${OUTPUT_DIR}` is the path of the .txt file where the BLEU score will be 
 
 To perform the analysis of heads, use the [heads_contribution.ipynb](https://github.com/mt-upc/fairseq-internal/blob/multiformer/examples/multiformer/heads_contribution.ipynb) jupyter notebook.
 
-![Heads Contribution Analysis](/fairseq-internal/tree/multiformer/examples/multiformer/media/Analisi_heads.png)
+![Heads Contribution Analysis](/media/Analisi_heads.png)
