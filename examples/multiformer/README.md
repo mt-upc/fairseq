@@ -120,3 +120,7 @@ PYTHONIOENCODING=utf-8 fairseq-generate ${MUSTC_ROOT}/en-${TGT} \
 ```
 
 Where ${OUTPUT_DIR} is the path of the .txt file where the BLEU score will be written.
+
+## Heads Contribution Analysis
+
+To perform heads analysis, use the "heads_contribution.ipynb" jupyter notebook.
