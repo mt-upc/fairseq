@@ -8,6 +8,7 @@ Implementation of the paper "Multiformer: A Head-Configurable Transformer-Based 
 
 *Different approaches have been proposed to overcome this problems, such as the use of efficient attention mechanisms. However, the use of this methods usually comes with a cost, which is a performance reduction caused by information loss. In this study, we present the Multiformer, a Transformer-based model which allows the use of different attention mechanisms on each head. By doing this, the model is able to bias the self-attention towards the extraction of more diverse token interactions, and the information loss is reduced. Finally, we perform an analysis of the head contributions, and we observe that those architectures where all heads relevance is uniformly distributed obtain better results. Our results show that mixing attention patterns along the different heads and layers outperforms our baseline by up to 0.7 BLEU.*
 
+![Multiformer](media/MHMA.png)
 ## Installation
 
 We use Singularity (v3.2.1) containers for this project, but you can run it with Docker as well.
