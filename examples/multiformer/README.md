@@ -10,19 +10,12 @@ Implementation of the paper "Multiformer: A Head-Configurable Transformer-Based 
 
 ## Installation
 
-
-Load the required versions of Singularity (alternative to Docker) and CUDA:
-
-```bash
-module load singularity/3.2.1 cuda/11.1
-
-# Make sure to have installed singularity version 3.2.1 (https://sylabs.io/guides/3.2/user-guide/installation.html) and cuda version 11.1 (https://developer.nvidia.com/cuda-11.1.0-download-archive).
-```
+We use Singularity (v3.2.1) containers for this project, but you can run it with Docker as well.
 
 Set the environment variables:
 ```bash
 export FAIRSEQ_ROOT=...             # where you'll clone our Fairseq fork
-export CONTAINER=.../multiformer    # specify a path for the multiformer container
+export CONTAINER=...                # specify a path for the multiformer container
 export MUSTC_ROOT=...               # where must-c dataset is located
 export MKL_THREADING_LAYER=GNU      # To avoid errors with the container
 ```
@@ -32,9 +25,9 @@ Clone this Fairseq branch:
 git clone -b multiformer https://github.com/mt-upc/fairseq-internal.git ${FAIRSEQ_ROOT}
 ```
 
-Create the container:
+Build the container (note that this is a [Docker image](https://hub.docker.com/layers/202763149/gegallego/repro-containers/multiformer-pytorch1.9.0-cu11.1/images/sha256-a922c0ed6b962882e0fef0013a5d0a71f40d039afcc9b09150afc671847f22c1)):
 ```bash
-singularity build --sandbox ${CONTAINER} docker://gegallego/repro-containers:base-pytorch1.9.0-cu11.1
+singularity build --sandbox ${CONTAINER} docker://gegallego/repro-containers:multiformer-pytorch1.9.0-cu11.1
 ```
 
 Install the required packages into the container:
