@@ -7,7 +7,6 @@ from typing import Any, Optional, Dict, List, Type
 import torch
 import torch.nn as nn
 
-from fairseq.checkpoint_utils import load_checkpoint_to_cpu
 from fairseq.data import Dictionary
 from fairseq.data.data_utils import lengths_to_padding_mask
 from fairseq.dataclass import FairseqDataclass
@@ -273,6 +272,7 @@ class S2TPretrainedComponent:
         component_type = cfg._name
 
         if training:
+            from fairseq.checkpoint_utils import load_checkpoint_to_cpu
             logger.info(f"Building {component_type} from: {cfg.path}")
             state = load_checkpoint_to_cpu(cfg.path)
             S2TPretrainedComponent.load_pre_args(cfg, state)
