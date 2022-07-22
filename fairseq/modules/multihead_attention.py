@@ -378,6 +378,7 @@ class MultiheadAttention(nn.Module):
                     dim=1,
                 )
 
+        tgt_len, src_len = len(q), len(k)
         q = (
             q.contiguous()
             .view(tgt_len, bsz * self.num_heads, self.head_dim)
