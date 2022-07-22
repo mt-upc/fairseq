@@ -37,6 +37,7 @@ from fairseq.models.transformer import (
 )
 from fairseq.modules.adapter import ScaledParallelAdapter
 from fairseq.models.speech_to_text import Conv1dSubsampler
+from fairseq.modules.modality_adapter import ModalityAdapter
 from fairseq.tasks import FairseqTask
 from fairseq.tasks.audio_pretraining import AudioPretrainingConfig
 from fairseq.tasks.hubert_pretraining import HubertPretrainingConfig
@@ -71,7 +72,73 @@ class AdaptersConfig(FairseqDataclass):
             "Apply Scaled Parallel Adapter at the Feed-forward sublayers of this component"}
     )
     
+    
+@dataclass
+class S2TModalityAdapterConfig(FairseqDataclass):
+    num_layers: int = field(
+        default=1,
+        metadata={"help": "# of Modality Adapter layers"}
+    )
+    in_channels: int = field(
+        default=1024,
+        metadata={"help": "# of input channels in the Modality Adapter"}
+    )
+    mid_channels: int = field(
+        default=1024,
+        metadata={"help": "# of intermediate channels in the Modality Adapter"}
+    )
+    out_channels: int = field(
+        default=1024,
+        metadata={"help": "# of output channels in the Modality Adapter"}
+    )
+    kernel_sizes: List[int] = field(
+        default_factory=lambda: [3, 3, 3],
+        metadata={"help": "kernel size of each Conv1d layer in the Pooled MHA"
+                  "and input pooling of each Modality Adapter layer."
+                  "Also indicates the number of Conv1d layers to be used."}
+    )
+    # NOTE: couldnt find a proper way to inherit them with II from the encoder
+    embed_dim: int = field(
+        default=1024,
+        metadata={"help": "model dimensionality"}
+    )
+    ffn_embed_dim: int = field(
+        default=4096,
+        metadata={"help": "feed-forward layer dimensionality"}
+    )
+    attention_heads: int = field(
+        default=16,
+        metadata={"help": "activation function"}
+    )
+    activation_fn: str = field(
+        default="gelu",
+        metadata={"help": "activation function"}
+    )
+    # NOTE: no information on dropout rates on the paper
+    # I guess we can use the same as in the rest of the model
+    dropout: float = field(
+        default=0.1,
+        metadata={"help": "dropout rate"}
+    )
+    activation_dropout: float = field(
+        default=0.1,
+        metadata={"help": "dropout rate after the activation function"}
+    )
+    attention_dropout: float = field(
+        default=0.1,
+        metadata={"help": "dropout rate after in the Pooled MHA"}
+    )
+    # NOTE: in figure(1) it seems they use post-LN
+    # both w2v and mbart are pre-LN meaning that w2v has a very final layer-norm
+    # and mbart-decoder starts with a layer-norm, so I think we can just use one
+    # layer-norm between MHA and FFN.
+    # For now I left it at post-ln
+    normalize_before: bool = field(
+        default=False,
+        metadata={"help": "whether to use a pre-LN architecture"}
+    )
 
+    
 @dataclass
 class S2TLengthAdaptorConfig(FairseqDataclass):
     in_channels: int = field(
@@ -86,7 +153,6 @@ class S2TLengthAdaptorConfig(FairseqDataclass):
         default=1024,
         metadata={"help": "# of output channels in the Length Adaptor"}
     )
-
     kernel_sizes: List[int] = field(
         default_factory=lambda: [3, 3, 3],
         metadata={"help": "kernel size of each Conv1d layer in the Length Adaptor"}
@@ -186,6 +252,10 @@ class S2TPretrainedEncoderConfig(S2TPretrainedComponentConfig):
         default=None,
         metadata={"help": "length adaptor configuration"},
     )
+    modality_adapter: Optional[S2TModalityAdapterConfig] = field(
+        default=None,
+        metadata={"help": "modality adapter configuration"},
+    )
 
     # Arguments for wav2vec(-ish) encoders
     masking: W2VMaskingConfig = field(
@@ -279,8 +349,11 @@ class S2TPretrainedComponent:
 
         if component_type == 'encoder':
             component = S2TPretrainedEncoder.get_class(cfg).build(cfg)
+            assert not (safe_hasattr(cfg, "length_adaptor") and safe_hasattr(cfg, "modality_adaptor"))
             if safe_hasattr(cfg, "length_adaptor") and not safe_hasattr(component, "length_adaptor"):
                 component.add_length_adaptor(cfg.length_adaptor)
+            if safe_hasattr(cfg, "modality_adapter") and not safe_hasattr(component, "modality_adapter"):
+                component.add_modality_adapter(cfg.modality_adapter)
         elif component_type == 'decoder':
             component = S2TPretrainedDecoder.get_class(cfg).build(cfg, dictionary)
         else:
@@ -370,6 +443,9 @@ class S2TPretrainedEncoder(FairseqEncoder, S2TPretrainedComponent):
             out_channels=cfg.out_channels,
             kernel_sizes=cfg.kernel_sizes,
         )
+        
+    def add_modality_adapter(self, cfg: S2TModalityAdapterConfig) -> None:
+        self.modality_adapter = ModalityAdapter(cfg)
 
     def pre_forward(self, src_tokens, src_lengths, **kwargs):
         return {
@@ -384,13 +460,19 @@ class S2TPretrainedEncoder(FairseqEncoder, S2TPretrainedComponent):
         return self.post_forward(encoder_out)
 
     def post_forward(self, encoder_out):
-        if safe_hasattr(self, "length_adaptor"):
+        if safe_hasattr(self, "length_adaptor") or safe_hasattr(self, "modality_adapter"):
             for i, (eo, epm) in enumerate(zip(encoder_out["encoder_out"], encoder_out["encoder_padding_mask"])):
-                eo = eo.transpose(0, 1)
-                lengths = (~epm).sum(dim=1) \
-                    if epm is not None else torch.LongTensor([eo.size(1)] * eo.size(0))
-                encoder_out["encoder_out"][i], lengths = self.length_adaptor(eo, lengths.to(eo.device))
-                encoder_out["encoder_padding_mask"][i] = lengths_to_padding_mask(lengths)
+                if safe_hasattr(self, "length_adaptor"):
+                    eo = eo.transpose(0, 1)
+                    lengths = (~epm).sum(dim=1) \
+                        if epm is not None else torch.LongTensor([eo.size(1)] * eo.size(0))
+                    encoder_out["encoder_out"][i], lengths = self.length_adaptor(eo, lengths.to(eo.device))
+                    encoder_out["encoder_padding_mask"][i] = lengths_to_padding_mask(lengths)
+                else:
+                    lengths = (~epm).sum(dim=1) \
+                        if epm is not None else torch.LongTensor([eo.size(0)] * eo.size(1))
+                    encoder_out["encoder_out"][i], encoder_out["encoder_padding_mask"][i] =  \
+                        self.modality_adapter(eo, lengths.to(eo.device))
         return encoder_out
     
     def add_adapters(self, cfg: AdaptersConfig) -> None:
