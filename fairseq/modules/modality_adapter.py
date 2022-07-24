@@ -9,32 +9,24 @@ from fairseq.modules import LayerNorm, MultiheadAttention
 from fairseq.modules.fairseq_dropout import FairseqDropout
 
 
-class Conv1dLayers(nn.Module):
-    def __init__(
-        self,
-        in_channels: int,
-        mid_channels: int,
-        out_channels: int,
-        kernel_sizes: List[int]
-    ):
-        super(Conv1dLayers, self).__init__()
-        self.n_layers = len(kernel_sizes)
+class PoolingLayers(nn.Module):
+    def __init__(self, embed_dim: int, kernel_sizes: List[int], stride: int = 2):
+        super(PoolingLayers, self).__init__()
         self.conv_layers = nn.ModuleList(
             nn.Conv1d(
-                in_channels if i == 0 else mid_channels // 2,
-                mid_channels if i < self.n_layers - 1 else out_channels * 2,
+                embed_dim,
+                embed_dim,
                 k,
-                stride=2,
+                stride,
                 padding=k // 2,
             )
-            for i, k in enumerate(kernel_sizes)
+            for k in kernel_sizes
         )
 
     def forward(self, x):
         x = x.permute(1, 2, 0).contiguous()  # -> B x D x T
         for conv in self.conv_layers:
             x = conv(x)
-            x = nn.functional.glu(x, dim=1)
         x = x.permute(2, 0, 1).contiguous()  # -> T x B x D
         return x
 
@@ -47,24 +39,19 @@ class MultiHeadPooledAttention(MultiheadAttention):
             dropout=cfg.attention_dropout,
             self_attention=True,
         )
-        
-        self.k_proj = self._modify(self.k_proj, cfg)
-        self.v_proj = self._modify(self.v_proj, cfg)
-        self.q_proj = self._modify(self.q_proj, cfg)
+
+        self.embed_dim = cfg.embed_dim
+        self.kernel_sizes = cfg.kernel_sizes
+
+        self.k_proj = self._modify(self.k_proj)
+        self.v_proj = self._modify(self.v_proj)
+        self.q_proj = self._modify(self.q_proj)
 
         # to bypass the pytorch MHA
         self._set_skip_embed_dim_check()
-        
-    def _modify(self, proj, cfg):
-        return nn.Sequential(
-            proj,
-            Conv1dLayers(
-                in_channels=cfg.in_channels,
-                mid_channels=cfg.mid_channels,
-                out_channels=cfg.out_channels,
-                kernel_sizes=cfg.kernel_sizes,
-            ),
-        )
+
+    def _modify(self, proj):
+        return nn.Sequential(proj, PoolingLayers(self.embed_dim, self.kernel_sizes))
 
     def forward(self, x, x_mask):
         result, _ = super().forward(query=x, key=x, value=x, key_padding_mask=x_mask)
@@ -85,12 +72,7 @@ class ModalityAdapterLayer(nn.Module):
         )
         self.activation_fn = utils.get_activation_fn(activation=cfg.activation_fn)
 
-        self.input_pool = Conv1dSubsampler(
-            in_channels=cfg.in_channels,
-            mid_channels=cfg.mid_channels,
-            out_channels=cfg.out_channels,
-            kernel_sizes=cfg.kernel_sizes,
-        )
+        self.input_pool = PoolingLayers(cfg.embed_dim, cfg.kernel_sizes)
 
         self.mhpa = MultiHeadPooledAttention(cfg)
 
@@ -141,8 +123,14 @@ class ModalityAdapter(nn.Module):
         self.layers = nn.ModuleList(
             [ModalityAdapterLayer(cfg) for _ in range(cfg.num_layers)]
         )
+        self.normalize_before = cfg.normalize_before
+        self.layer_norm = LayerNorm(cfg.embed_dim)
 
     def forward(self, x, x_len):
+        if not self.normalize_before:
+            x = self.layer_norm(x)
         for layer in self.layers:
             x, x_len, x_mask = layer(x, x_len)
+        if self.normalize_before:
+            x = self.layer_norm(x)
         return x, x_mask
