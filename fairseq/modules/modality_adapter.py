@@ -4,7 +4,6 @@ from torch import nn
 
 from fairseq import utils
 from fairseq.data.data_utils import lengths_to_padding_mask
-from fairseq.models.speech_to_text import Conv1dSubsampler
 from fairseq.modules import LayerNorm, MultiheadAttention
 from fairseq.modules.fairseq_dropout import FairseqDropout
 
@@ -12,6 +11,7 @@ from fairseq.modules.fairseq_dropout import FairseqDropout
 class PoolingLayers(nn.Module):
     def __init__(self, embed_dim: int, kernel_sizes: List[int], stride: int = 2):
         super(PoolingLayers, self).__init__()
+        self.n_layers = len(kernel_sizes)
         self.conv_layers = nn.ModuleList(
             nn.Conv1d(
                 embed_dim,
@@ -22,6 +22,12 @@ class PoolingLayers(nn.Module):
             )
             for k in kernel_sizes
         )
+
+    def get_out_seq_lens_tensor(self, in_seq_lens_tensor):
+        out = in_seq_lens_tensor.clone()
+        for _ in range(self.n_layers):
+            out = ((out.float() - 1) / 2 + 1).floor().long()
+        return out
 
     def forward(self, x):
         x = x.permute(1, 2, 0).contiguous()  # -> B x D x T
@@ -90,7 +96,9 @@ class ModalityAdapterLayer(nn.Module):
 
         residual = x
 
-        residual, x_len = self.input_pool(residual.transpose(0, 1), x_len)
+        # pool input and get new mask
+        residual = self.input_pool(residual)
+        x_len = self.input_pool.get_out_seq_lens_tensor(x_len)
         x_mask = lengths_to_padding_mask(x_len)
 
         x = self.mhpa(x, x_mask)
