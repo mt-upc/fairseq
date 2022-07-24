@@ -79,18 +79,6 @@ class S2TModalityAdapterConfig(FairseqDataclass):
         default=1,
         metadata={"help": "# of Modality Adapter layers"}
     )
-    in_channels: int = field(
-        default=1024,
-        metadata={"help": "# of input channels in the Modality Adapter"}
-    )
-    mid_channels: int = field(
-        default=1024,
-        metadata={"help": "# of intermediate channels in the Modality Adapter"}
-    )
-    out_channels: int = field(
-        default=1024,
-        metadata={"help": "# of output channels in the Modality Adapter"}
-    )
     kernel_sizes: List[int] = field(
         default_factory=lambda: [3, 3, 3],
         metadata={"help": "kernel size of each Conv1d layer in the Pooled MHA"
@@ -129,12 +117,9 @@ class S2TModalityAdapterConfig(FairseqDataclass):
         metadata={"help": "dropout rate after in the Pooled MHA"}
     )
     # NOTE: in figure(1) it seems they use post-LN
-    # both w2v and mbart are pre-LN meaning that w2v has a very final layer-norm
-    # and mbart-decoder starts with a layer-norm, so I think we can just use one
-    # layer-norm between MHA and FFN.
-    # For now I left it at post-ln
+    # but I think it should be pre-LN because both wav2vec and mbart are pre-LN
     normalize_before: bool = field(
-        default=False,
+        default=True,
         metadata={"help": "whether to use a pre-LN architecture"}
     )
 
