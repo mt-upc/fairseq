@@ -1,3 +1,4 @@
+import contextlib
 import re
 import logging
 from dataclasses import dataclass, field
@@ -217,6 +218,10 @@ class S2TPretrainedComponentConfig(FairseqDataclass):
         default_factory= lambda: [],
         metadata={"help": "list of layers to reset in pretrained component (no_load_weights must be False)"},
     )
+    freeze_finetune_updates: int = field(
+        default=0,
+        metadata={"help": "For how many updates to freeze the component in the start of training"}
+    )
     dropout: float = field(default=0.0, metadata={"help": "dropout probability"})
     attention_dropout: float = field(
         default=0.0,
@@ -292,6 +297,7 @@ class S2TPretrainedModel(FairseqEncoderDecoderModel):
 
     def __init__(self, encoder, decoder):
         super().__init__(encoder, decoder)
+        self.num_updates = 0
 
     @classmethod
     def build_model(cls, cfg: S2TPretrainedConfig, task: SpeechToTextTask) -> "S2TPretrainedModel":
@@ -299,12 +305,17 @@ class S2TPretrainedModel(FairseqEncoderDecoderModel):
         decoder = S2TPretrainedComponent.build(cfg.decoder, task.target_dictionary)
         return cls(encoder, decoder)
 
-
+    def set_num_updates(self, num_updates):
+        self.num_updates = num_updates
+        self.encoder.num_updates = num_updates
+        self.decoder.num_updates = num_updates
+ 
 class S2TPretrainedComponent:
     """ Base class for pretrained S2T encoders and decoders. """
     
     def __init__(self, cfg: S2TPretrainedComponentConfig):
         self.cfg_ = cfg
+        self.num_updates = 0
 
     @staticmethod
     def load_pre_args(cfg: S2TPretrainedComponentConfig, state: Dict) -> None:
@@ -440,8 +451,11 @@ class S2TPretrainedEncoder(FairseqEncoder, S2TPretrainedComponent):
         }
 
     def forward(self, src_tokens, src_lengths, **kwargs):
-        encoder_inputs = self.pre_forward(src_tokens, src_lengths, **kwargs)
-        encoder_out = self.ORIGINAL_MODEL_CLS.forward(self, **encoder_inputs)
+        print("num encoder updates", self.num_updates, self.cfg_.freeze_finetune_updates)
+        ft = self.cfg_.freeze_finetune_updates <= self.num_updates
+        with torch.no_grad() if not ft else contextlib.ExitStack():
+            encoder_inputs = self.pre_forward(src_tokens, src_lengths, **kwargs)
+            encoder_out = self.ORIGINAL_MODEL_CLS.forward(self, **encoder_inputs)
         return self.post_forward(encoder_out)
 
     def post_forward(self, encoder_out):
@@ -639,6 +653,14 @@ class S2TPretrainedDecoder(FairseqDecoder, S2TPretrainedComponent):
         S2TPretrainedComponent.__init__(self, cfg)
         
         self.embed_dim = cfg["pre_args"]["model"].decoder_embed_dim
+        
+    def forward(self, prev_output_tokens, encoder_out=None, **kwargs):
+        print("num decoder updates", self.num_updates, self.cfg_.freeze_finetune_updates)
+        ft = self.cfg_.freeze_finetune_updates <= self.num_updates
+        with torch.no_grad() if not ft else contextlib.ExitStack():
+            result = super().forward(prev_output_tokens, encoder_out, **kwargs)
+            result = (result[0].requires_grad_(True), result[1])
+        return result
 
     @classmethod
     def get_class(cls, cfg: S2TPretrainedDecoderConfig) -> Type['S2TPretrainedEncoder']:
