@@ -316,6 +316,7 @@ class S2TPretrainedComponent:
     def __init__(self, cfg: S2TPretrainedComponentConfig):
         self.cfg_ = cfg
         self.num_updates = 0
+        self.is_finetuning = True
 
     @staticmethod
     def load_pre_args(cfg: S2TPretrainedComponentConfig, state: Dict) -> None:
@@ -392,17 +393,35 @@ class S2TPretrainedComponent:
         )
 
     def freeze_layers(self) -> None:
-        frozen_params = []
+        self.frozen_params = []
         for n, p in self.named_parameters():
             for l in self.cfg_.layers_to_freeze:
                 l = re.compile(eval(l))
                 if re.match(l, n):
                     p.requires_grad = False
-                    frozen_params.append(n)
+                    self.frozen_params.append(n)
         logger.info(
-            f"Freezing parameters:\n\t" + '\n\t'.join(frozen_params)
+            f"Freezing parameters:\n\t" + '\n\t'.join(self.frozen_params)
         )
 
+    def change_finetuning_stage(self) -> None:
+        ft = self.num_updates >= self.cfg_.freeze_finetune_updates
+        if not ft and self.is_finetuning:
+            logger.info(f"Changing state of {self.component_type} to FROZEN")
+            self.is_finetuning = False
+            for n, p in self.named_parameters():
+                if not (hasattr(self, "coupling_module_name") and self.coupling_module_name in n):
+                    p.requires_grad_(False)
+                else:
+                    logger.info(f"Not freezing {n}")
+        if ft and not self.is_finetuning:
+            logger.info(f"Changing state of {self.component_type} to FINETUNING")
+            self.is_finetuning = True
+            for n, p in self.named_parameters():
+                if n not in self.frozen_params:
+                    p.requires_grad_(True)
+                else:
+                    logger.info(f"Not unfreezing {n}")
 
 class S2TPretrainedEncoder(FairseqEncoder, S2TPretrainedComponent):
     """ Base class for pretrained S2T encoders """
@@ -412,6 +431,7 @@ class S2TPretrainedEncoder(FairseqEncoder, S2TPretrainedComponent):
         S2TPretrainedComponent.__init__(self, cfg)
         
         self.embed_dim = cfg["pre_args"]["model"]["w2v_args"]["model"].encoder_embed_dim
+        self.component_type = "ENCODER"
 
     @classmethod
     def get_class(cls, cfg: S2TPretrainedEncoderConfig) -> Type['S2TPretrainedEncoder']:
@@ -433,6 +453,7 @@ class S2TPretrainedEncoder(FairseqEncoder, S2TPretrainedComponent):
         return cls(cfg)
 
     def add_length_adaptor(self, cfg: S2TLengthAdaptorConfig) -> None:
+        self.coupling_module_name = "length_adaptor"
         self.length_adaptor = Conv1dSubsampler(
             in_channels=cfg.in_channels,
             mid_channels=cfg.mid_channels,
@@ -441,6 +462,7 @@ class S2TPretrainedEncoder(FairseqEncoder, S2TPretrainedComponent):
         )
         
     def add_modality_adapter(self, cfg: S2TModalityAdapterConfig) -> None:
+        self.coupling_module_name = "modality_adapter"
         self.modality_adapter = ModalityAdapter(cfg)
 
     def pre_forward(self, src_tokens, src_lengths, **kwargs):
@@ -451,10 +473,9 @@ class S2TPretrainedEncoder(FairseqEncoder, S2TPretrainedComponent):
         }
 
     def forward(self, src_tokens, src_lengths, **kwargs):
-        ft = self.cfg_.freeze_finetune_updates <= self.num_updates
-        with torch.no_grad() if not ft else contextlib.ExitStack():
-            encoder_inputs = self.pre_forward(src_tokens, src_lengths, **kwargs)
-            encoder_out = self.ORIGINAL_MODEL_CLS.forward(self, **encoder_inputs)
+        self.change_finetuning_stage()
+        encoder_inputs = self.pre_forward(src_tokens, src_lengths, **kwargs)
+        encoder_out = self.ORIGINAL_MODEL_CLS.forward(self, **encoder_inputs)
         return self.post_forward(encoder_out)
 
     def post_forward(self, encoder_out):
@@ -652,16 +673,11 @@ class S2TPretrainedDecoder(FairseqDecoder, S2TPretrainedComponent):
         S2TPretrainedComponent.__init__(self, cfg)
         
         self.embed_dim = cfg["pre_args"]["model"].decoder_embed_dim
+        self.component_type = "DECODER"
         
     def forward(self, prev_output_tokens, encoder_out=None, **kwargs):
-        ft = self.cfg_.freeze_finetune_updates <= self.num_updates
-        if not ft:
-            for i in range(len(encoder_out["encoder_out"])):
-                encoder_out["encoder_out"][i].retain_grad()
-        with torch.no_grad() if not ft else contextlib.ExitStack():
-            result = super().forward(prev_output_tokens, encoder_out, **kwargs)
-            result = (result[0].requires_grad_(True), result[1])
-        return result
+        self.change_finetuning_stage()
+        return super().forward(prev_output_tokens, encoder_out, **kwargs)
 
     @classmethod
     def get_class(cls, cfg: S2TPretrainedDecoderConfig) -> Type['S2TPretrainedEncoder']:
