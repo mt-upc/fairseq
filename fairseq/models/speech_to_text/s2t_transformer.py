@@ -3,6 +3,7 @@
 import logging
 import math
 from pathlib import Path
+from functools import partial
 from typing import Dict, List, Optional, Tuple
 
 import torch
@@ -47,19 +48,24 @@ class Conv1dSubsampler(nn.Module):
         mid_channels: int,
         out_channels: int,
         kernel_sizes: List[int] = (3, 3),
+        activation_fn='glu',
     ):
         super(Conv1dSubsampler, self).__init__()
         self.n_layers = len(kernel_sizes)
         self.conv_layers = nn.ModuleList(
             nn.Conv1d(
-                in_channels if i == 0 else mid_channels // 2,
-                mid_channels if i < self.n_layers - 1 else out_channels * 2,
+                mid_channels // 2 if (i > 0 and activation_fn == 'glu') else in_channels,
+                out_channels * 2 if (i == self.n_layers - 1 and activation_fn == 'glu') \
+                    else out_channels if (i == self.n_layers - 1) else mid_channels,
                 k,
                 stride=2,
                 padding=k // 2,
             )
             for i, k in enumerate(kernel_sizes)
         )
+        self.activation_fn = partial(nn.functional.glu, dim=1) \
+            if activation_fn == 'glu' else \
+            utils.get_activation_fn(activation_fn)
 
     def get_out_seq_lens_tensor(self, in_seq_lens_tensor):
         out = in_seq_lens_tensor.clone()
@@ -72,7 +78,7 @@ class Conv1dSubsampler(nn.Module):
         x = src_tokens.transpose(1, 2).contiguous()  # -> B x (C x D) x T
         for conv in self.conv_layers:
             x = conv(x)
-            x = nn.functional.glu(x, dim=1)
+            x = self.activation_fn(x)
         _, _, out_seq_len = x.size()
         x = x.transpose(1, 2).transpose(0, 1).contiguous()  # -> T x B x (C x D)
         return x, self.get_out_seq_lens_tensor(src_lengths)
@@ -135,6 +141,12 @@ class S2TTransformerModel(FairseqEncoderDecoderModel):
             type=int,
             metavar="N",
             help="# of channels in Conv1d subsampling layers",
+        )
+        parser.add_argument(
+            "--conv-activation-fn",
+            type=int,
+            metavar="N",
+            help="activation fn in Conv1d subsampling layers",
         )
         # Transformer
         parser.add_argument(
@@ -326,6 +338,7 @@ class S2TTransformerEncoder(FairseqEncoder):
             args.conv_channels,
             args.encoder_embed_dim,
             [int(k) for k in args.conv_kernel_sizes.split(",")],
+            args.conv_activation_fn,
         )
 
         self.embed_positions = PositionalEmbedding(
@@ -453,6 +466,7 @@ def base_architecture(args):
     # Convolutional subsampler
     args.conv_kernel_sizes = getattr(args, "conv_kernel_sizes", "5,5")
     args.conv_channels = getattr(args, "conv_channels", 1024)
+    args.conv_activation_fn = getattr(args, "conv_activation_fn", "glu")
     # Transformer
     args.encoder_embed_dim = getattr(args, "encoder_embed_dim", 512)
     args.encoder_ffn_embed_dim = getattr(args, "encoder_ffn_embed_dim", 2048)
