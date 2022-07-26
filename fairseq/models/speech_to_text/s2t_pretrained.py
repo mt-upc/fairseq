@@ -297,7 +297,6 @@ class S2TPretrainedModel(FairseqEncoderDecoderModel):
 
     def __init__(self, encoder, decoder):
         super().__init__(encoder, decoder)
-        self.num_updates = 0
 
     @classmethod
     def build_model(cls, cfg: S2TPretrainedConfig, task: SpeechToTextTask) -> "S2TPretrainedModel":
@@ -305,17 +304,12 @@ class S2TPretrainedModel(FairseqEncoderDecoderModel):
         decoder = S2TPretrainedComponent.build(cfg.decoder, task.target_dictionary)
         return cls(encoder, decoder)
 
-    def set_num_updates(self, num_updates):
-        self.num_updates = num_updates
-        self.encoder.num_updates = num_updates
-        self.decoder.num_updates = num_updates
  
 class S2TPretrainedComponent:
     """ Base class for pretrained S2T encoders and decoders. """
     
     def __init__(self, cfg: S2TPretrainedComponentConfig):
         self.cfg_ = cfg
-        self.num_updates = 0
         self.is_finetuning = True
 
     @staticmethod
@@ -422,6 +416,10 @@ class S2TPretrainedComponent:
                     p.requires_grad_(True)
                 else:
                     logger.info(f"Not unfreezing {n}")
+
+    def set_num_updates(self, num_updates):
+        self.num_updates = num_updates
+
 
 class S2TPretrainedEncoder(FairseqEncoder, S2TPretrainedComponent):
     """ Base class for pretrained S2T encoders """
