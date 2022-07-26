@@ -451,7 +451,6 @@ class S2TPretrainedEncoder(FairseqEncoder, S2TPretrainedComponent):
         }
 
     def forward(self, src_tokens, src_lengths, **kwargs):
-        print("num encoder updates", self.num_updates, self.cfg_.freeze_finetune_updates)
         ft = self.cfg_.freeze_finetune_updates <= self.num_updates
         with torch.no_grad() if not ft else contextlib.ExitStack():
             encoder_inputs = self.pre_forward(src_tokens, src_lengths, **kwargs)
@@ -655,8 +654,10 @@ class S2TPretrainedDecoder(FairseqDecoder, S2TPretrainedComponent):
         self.embed_dim = cfg["pre_args"]["model"].decoder_embed_dim
         
     def forward(self, prev_output_tokens, encoder_out=None, **kwargs):
-        print("num decoder updates", self.num_updates, self.cfg_.freeze_finetune_updates)
         ft = self.cfg_.freeze_finetune_updates <= self.num_updates
+        if not ft:
+            for i in range(len(encoder_out["encoder_out"])):
+                encoder_out["encoder_out"][i].retain_grad()
         with torch.no_grad() if not ft else contextlib.ExitStack():
             result = super().forward(prev_output_tokens, encoder_out, **kwargs)
             result = (result[0].requires_grad_(True), result[1])
