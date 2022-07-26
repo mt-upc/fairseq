@@ -91,6 +91,10 @@ class S2TLengthAdaptorConfig(FairseqDataclass):
         default_factory=lambda: [3, 3, 3],
         metadata={"help": "kernel size of each Conv1d layer in the Length Adaptor"}
     )
+    activation_fn: str = field(
+        default="glu",
+        metadata={"help": "activation function"}
+    )
 
 
 @dataclass
@@ -369,6 +373,7 @@ class S2TPretrainedEncoder(FairseqEncoder, S2TPretrainedComponent):
             mid_channels=cfg.mid_channels,
             out_channels=cfg.out_channels,
             kernel_sizes=cfg.kernel_sizes,
+            activation_fn=cfg.activation_fn,
         )
 
     def pre_forward(self, src_tokens, src_lengths, **kwargs):
