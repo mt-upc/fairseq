@@ -91,10 +91,9 @@ class ModalityAdapterLayer(nn.Module):
 
     def forward(self, x, x_len):
 
+        residual = x
         if self.normalize_before:
             x = self.attn_layer_norm(x)
-
-        residual = x
 
         # pool input and get new mask
         residual = self.input_pool(residual)
