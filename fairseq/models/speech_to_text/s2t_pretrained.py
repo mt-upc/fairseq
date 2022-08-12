@@ -314,7 +314,6 @@ class S2TPretrainedComponent:
     
     def __init__(self, cfg: S2TPretrainedComponentConfig):
         self.cfg_ = cfg
-        self.is_finetuning = True
 
     @staticmethod
     def load_pre_args(cfg: S2TPretrainedComponentConfig, state: Dict) -> None:
@@ -402,25 +401,6 @@ class S2TPretrainedComponent:
             f"Freezing parameters:\n\t" + '\n\t'.join(self.frozen_params)
         )
 
-    def change_finetuning_stage(self) -> None:
-        ft = self.num_updates >= self.cfg_.freeze_finetune_updates
-        if not ft and self.is_finetuning:
-            logger.info(f"Changing state of {self.component_type} to FROZEN")
-            self.is_finetuning = False
-            for n, p in self.named_parameters():
-                if not (hasattr(self, "coupling_module_name") and self.coupling_module_name in n):
-                    p.requires_grad_(False)
-                else:
-                    logger.info(f"Not freezing {n}")
-        if ft and not self.is_finetuning:
-            logger.info(f"Changing state of {self.component_type} to FINETUNING")
-            self.is_finetuning = True
-            for n, p in self.named_parameters():
-                if n not in self.frozen_params:
-                    p.requires_grad_(True)
-                else:
-                    logger.info(f"Not unfreezing {n}")
-
     def set_num_updates(self, num_updates):
         self.num_updates = num_updates
 
@@ -476,7 +456,6 @@ class S2TPretrainedEncoder(FairseqEncoder, S2TPretrainedComponent):
         }
 
     def forward(self, src_tokens, src_lengths, **kwargs):
-        self.change_finetuning_stage()
         encoder_inputs = self.pre_forward(src_tokens, src_lengths, **kwargs)
         encoder_out = self.ORIGINAL_MODEL_CLS.forward(self, **encoder_inputs)
         return self.post_forward(encoder_out)
@@ -679,7 +658,6 @@ class S2TPretrainedDecoder(FairseqDecoder, S2TPretrainedComponent):
         self.component_type = "DECODER"
         
     def forward(self, prev_output_tokens, encoder_out=None, **kwargs):
-        self.change_finetuning_stage()
         return super().forward(prev_output_tokens, encoder_out, **kwargs)
 
     @classmethod
