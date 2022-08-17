@@ -439,7 +439,6 @@ class S2TPretrainedEncoder(FairseqEncoder, S2TPretrainedComponent):
         return cls(cfg)
 
     def add_length_adaptor(self, cfg: S2TLengthAdaptorConfig) -> None:
-        self.coupling_module_name = "length_adaptor"
         self.length_adaptor = Conv1dSubsampler(
             in_channels=cfg.in_channels,
             mid_channels=cfg.mid_channels,
@@ -449,7 +448,6 @@ class S2TPretrainedEncoder(FairseqEncoder, S2TPretrainedComponent):
         )
         
     def add_modality_adapter(self, cfg: S2TModalityAdapterConfig) -> None:
-        self.coupling_module_name = "modality_adapter"
         self.modality_adapter = ModalityAdapter(cfg)
 
     def pre_forward(self, src_tokens, src_lengths, **kwargs):
