@@ -1,6 +1,6 @@
 from typing import List
 
-from torch import nn
+from torch import nn, LongTensor
 
 from fairseq import utils
 from fairseq.data.data_utils import lengths_to_padding_mask
@@ -8,32 +8,25 @@ from fairseq.modules import LayerNorm, MultiheadAttention
 from fairseq.modules.fairseq_dropout import FairseqDropout
 
 
-class PoolingLayers(nn.Module):
-    def __init__(self, embed_dim: int, kernel_sizes: List[int], stride: int = 2):
-        super(PoolingLayers, self).__init__()
-        self.n_layers = len(kernel_sizes)
-        self.conv_layers = nn.ModuleList(
-            nn.Conv1d(
-                embed_dim,
-                embed_dim,
-                k,
-                stride,
-                padding=k // 2,
-            )
-            for k in kernel_sizes
-        )
+class PoolingLayer(nn.Module):
+    def __init__(self, embed_dim: int, kernel_size: int = 8, stride: int = 8):
+        super(PoolingLayer, self).__init__()
+        self.d = embed_dim
+        self.ksz = kernel_size
+        self.st = stride
+        self.pad = stride // 2
+        self.conv = nn.Conv1d(self.d, self.d, self.ksz, self.st, self.pad)
 
-    def get_out_seq_lens_tensor(self, in_seq_lens_tensor):
-        out = in_seq_lens_tensor.clone()
-        for _ in range(self.n_layers):
-            out = ((out.float() - 1) / 2 + 1).floor().long()
-        return out
+    def get_out_seq_lens_tensor(self, in_lengths: LongTensor):
+        in_lengths = in_lengths.float()
+        out_lengths = (in_lengths + 2 * self.pad - self.ksz) / self.st + 1
+        out_lengths = out_lengths.floor().long()
+        return out_lengths
 
     def forward(self, x):
-        x = x.permute(1, 2, 0).contiguous()  # -> B x D x T
-        for conv in self.conv_layers:
-            x = conv(x)
-        x = x.permute(2, 0, 1).contiguous()  # -> T x B x D
+        x = x.permute(1, 2, 0).contiguous()  # T x B x C-> B x C x T
+        x = self.conv(x)
+        x = x.permute(2, 0, 1).contiguous()  # B x C x T -> T x B x C
         return x
 
 
@@ -47,7 +40,8 @@ class MultiHeadPooledAttention(MultiheadAttention):
         )
 
         self.embed_dim = cfg.embed_dim
-        self.kernel_sizes = cfg.kernel_sizes
+        self.kernel_size = cfg.kernel_size
+        self.stride = cfg.stride
 
         self.k_proj = self._modify(self.k_proj)
         self.v_proj = self._modify(self.v_proj)
@@ -57,7 +51,10 @@ class MultiHeadPooledAttention(MultiheadAttention):
         self._set_skip_embed_dim_check()
 
     def _modify(self, proj):
-        return nn.Sequential(proj, PoolingLayers(self.embed_dim, self.kernel_sizes))
+        return nn.Sequential(
+            proj,
+            PoolingLayer(self.embed_dim, self.kernel_size, self.stride),
+        )
 
     def forward(self, x, x_mask):
         result, _ = super().forward(query=x, key=x, value=x, key_padding_mask=x_mask)
@@ -78,7 +75,11 @@ class ModalityAdapterLayer(nn.Module):
         )
         self.activation_fn = utils.get_activation_fn(activation=cfg.activation_fn)
 
-        self.input_pool = PoolingLayers(cfg.embed_dim, cfg.kernel_sizes)
+        self.input_pool = PoolingLayer(
+            cfg.embed_dim,
+            cfg.kernel_size,
+            cfg.stride,
+        )
 
         self.mhpa = MultiHeadPooledAttention(cfg)
 

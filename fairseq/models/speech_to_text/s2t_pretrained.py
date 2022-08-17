@@ -80,11 +80,15 @@ class S2TModalityAdapterConfig(FairseqDataclass):
         default=1,
         metadata={"help": "# of Modality Adapter layers"}
     )
-    kernel_sizes: List[int] = field(
-        default_factory=lambda: [3, 3, 3],
-        metadata={"help": "kernel size of each Conv1d layer in the Pooled MHA"
-                  "and input pooling of each Modality Adapter layer."
-                  "Also indicates the number of Conv1d layers to be used."}
+    kernel_size: int = field(
+        default=8,
+        metadata={"help": "kernel size of each Conv1d in the Pooled MHA"
+                        "and input pooling of each Modality Adapter layer."}
+    )
+    stride: int = field(
+        default=8,
+        metadata={"help": "stride of each Conv1d in the Pooled MHA"
+                        "and input pooling of each Modality Adapter layer."}
     )
     # NOTE: couldnt find a proper way to inherit them with II from the encoder
     embed_dim: int = field(
@@ -461,19 +465,20 @@ class S2TPretrainedEncoder(FairseqEncoder, S2TPretrainedComponent):
         return self.post_forward(encoder_out)
 
     def post_forward(self, encoder_out):
-        if safe_hasattr(self, "length_adaptor") or safe_hasattr(self, "modality_adapter"):
-            for i, (eo, epm) in enumerate(zip(encoder_out["encoder_out"], encoder_out["encoder_padding_mask"])):
-                if safe_hasattr(self, "length_adaptor"):
-                    eo = eo.transpose(0, 1)
-                    lengths = (~epm).sum(dim=1) \
-                        if epm is not None else torch.LongTensor([eo.size(1)] * eo.size(0))
-                    encoder_out["encoder_out"][i], lengths = self.length_adaptor(eo, lengths.to(eo.device))
-                    encoder_out["encoder_padding_mask"][i] = lengths_to_padding_mask(lengths)
-                else:
-                    lengths = (~epm).sum(dim=1) \
-                        if epm is not None else torch.LongTensor([eo.size(0)] * eo.size(1))
-                    encoder_out["encoder_out"][i], encoder_out["encoder_padding_mask"][i] =  \
-                        self.modality_adapter(eo, lengths.to(eo.device))
+        for i, (eo, epm) in enumerate(zip(encoder_out["encoder_out"], encoder_out["encoder_padding_mask"])):
+            if safe_hasattr(self, "length_adaptor"):
+                eo = eo.transpose(0, 1)
+                lengths = (~epm).sum(dim=1) \
+                    if epm is not None else torch.LongTensor([eo.size(1)] * eo.size(0))
+                encoder_out["encoder_out"][i], lengths = self.length_adaptor(eo, lengths.to(eo.device))
+                encoder_out["encoder_padding_mask"][i] = lengths_to_padding_mask(lengths)
+            elif safe_hasattr(self, "modality_adapter"):
+                lengths = (~epm).sum(dim=1) \
+                    if epm is not None else torch.LongTensor([eo.size(0)] * eo.size(1))
+                encoder_out["encoder_out"][i], encoder_out["encoder_padding_mask"][i] =  \
+                    self.modality_adapter(eo, lengths.to(eo.device))
+            else:
+                pass
         return encoder_out
     
     def add_adapters(self, cfg: AdaptersConfig) -> None:
