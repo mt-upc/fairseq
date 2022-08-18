@@ -37,8 +37,7 @@ from fairseq.models.transformer import (
     TransformerDecoder,
 )
 from fairseq.modules.adapter import ScaledParallelAdapter
-from fairseq.models.speech_to_text import Conv1dSubsampler
-from fairseq.modules.modality_adapter import ModalityAdapter
+from fairseq.modules.length_adaptor import Conv1dAdaptor, ModalityAdapter
 from fairseq.tasks import FairseqTask
 from fairseq.tasks.audio_pretraining import AudioPretrainingConfig
 from fairseq.tasks.hubert_pretraining import HubertPretrainingConfig
@@ -130,22 +129,42 @@ class S2TModalityAdapterConfig(FairseqDataclass):
 
     
 @dataclass
-class S2TLengthAdaptorConfig(FairseqDataclass):
+class LengthAdaptorConfig(FairseqDataclass):
     in_channels: int = field(
         default=1024,
         metadata={"help": "# of input channels in the Length Adaptor"}
-    )
-    mid_channels: int = field(
-        default=1024,
-        metadata={"help": "# of intermediate channels in the Length Adaptor"}
     )
     out_channels: int = field(
         default=1024,
         metadata={"help": "# of output channels in the Length Adaptor"}
     )
-    kernel_sizes: List[int] = field(
-        default_factory=lambda: [3, 3, 3],
-        metadata={"help": "kernel size of each Conv1d layer in the Length Adaptor"}
+    mid_channels: int = field(
+        default=II("model.encoder.length_adaptor.out_channels"),
+        metadata={"help": "# of intermediate channels in the Length Adaptor"}
+    )
+    num_layers: int = field(
+        default=1,
+        metadata={"help": "# of Conv1d layers"}
+    )
+    kernel_size: int = field(
+        default=3,
+        metadata={"help": "kernel size of each Conv1d in the Length Adaptor"}
+    )
+    stride: int = field(
+        default=2,
+        metadata={"help": "stride of each Conv1d in the Length Adaptor"}
+    )
+    layerdrop: float = field(
+        default=0.0,
+        metadata={"help": "whether to use LayerDrop in the Length Adaptor"}
+    )
+    layernorm: bool = field(
+        default=False,
+        metadata={"help": "whether to use LayerNorm in the Length Adaptor"}
+    )
+    projection: bool = field(
+        default=False,
+        metadata={"help": "whether to apply projections in the Length Adaptor"}
     )
     activation_fn: str = field(
         default="glu",
@@ -246,7 +265,7 @@ class S2TPretrainedComponentConfig(FairseqDataclass):
 
 @dataclass
 class S2TPretrainedEncoderConfig(S2TPretrainedComponentConfig):
-    length_adaptor: Optional[S2TLengthAdaptorConfig] = field(
+    length_adaptor: Optional[LengthAdaptorConfig] = field(
         default=None,
         metadata={"help": "length adaptor configuration"},
     )
@@ -438,12 +457,17 @@ class S2TPretrainedEncoder(FairseqEncoder, S2TPretrainedComponent):
         cls.update_pre_args(cfg)
         return cls(cfg)
 
-    def add_length_adaptor(self, cfg: S2TLengthAdaptorConfig) -> None:
-        self.length_adaptor = Conv1dSubsampler(
-            in_channels=cfg.in_channels,
-            mid_channels=cfg.mid_channels,
-            out_channels=cfg.out_channels,
-            kernel_sizes=cfg.kernel_sizes,
+    def add_length_adaptor(self, cfg: LengthAdaptorConfig) -> None:
+        self.length_adaptor = Conv1dAdaptor(
+            in_dim=cfg.in_channels,
+            out_dim=cfg.out_channels,
+            mid_dim=cfg.mid_channels,
+            n_layers=cfg.num_layers,
+            kernel_size=cfg.kernel_size,
+            stride=cfg.stride,
+            layerdrop=cfg.layerdrop,
+            layernorm=cfg.layernorm,
+            proj=cfg.projection,
             activation_fn=cfg.activation_fn,
         )
         
@@ -465,11 +489,8 @@ class S2TPretrainedEncoder(FairseqEncoder, S2TPretrainedComponent):
     def post_forward(self, encoder_out):
         for i, (eo, epm) in enumerate(zip(encoder_out["encoder_out"], encoder_out["encoder_padding_mask"])):
             if safe_hasattr(self, "length_adaptor"):
-                eo = eo.transpose(0, 1)
-                lengths = (~epm).sum(dim=1) \
-                    if epm is not None else torch.LongTensor([eo.size(1)] * eo.size(0))
-                encoder_out["encoder_out"][i], lengths = self.length_adaptor(eo, lengths.to(eo.device))
-                encoder_out["encoder_padding_mask"][i] = lengths_to_padding_mask(lengths)
+                encoder_out["encoder_out"][i], encoder_out["encoder_padding_mask"][i] = \
+                    self.length_adaptor(eo, epm)
             elif safe_hasattr(self, "modality_adapter"):
                 lengths = (~epm).sum(dim=1) \
                     if epm is not None else torch.LongTensor([eo.size(0)] * eo.size(1))
