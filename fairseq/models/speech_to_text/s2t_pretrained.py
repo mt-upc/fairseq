@@ -37,7 +37,12 @@ from fairseq.models.transformer import (
     TransformerDecoder,
 )
 from fairseq.modules.adapter import ScaledParallelAdapter
-from fairseq.modules.length_adaptor import Conv1dAdaptor, ModalityAdapter
+from fairseq.modules.length_adaptor import (
+    Conv1dAdaptorConfig,
+    Conv1dAdaptor,
+    ModalityAdapterConfig,
+    ModalityAdapter,
+)
 from fairseq.tasks import FairseqTask
 from fairseq.tasks.audio_pretraining import AudioPretrainingConfig
 from fairseq.tasks.hubert_pretraining import HubertPretrainingConfig
@@ -71,104 +76,17 @@ class AdaptersConfig(FairseqDataclass):
         metadata={"help":
             "Apply Scaled Parallel Adapter at the Feed-forward sublayers of this component"}
     )
-    
-    
-@dataclass
-class S2TModalityAdapterConfig(FairseqDataclass):
-    num_layers: int = field(
-        default=1,
-        metadata={"help": "# of Modality Adapter layers"}
-    )
-    kernel_size: int = field(
-        default=8,
-        metadata={"help": "kernel size of each Conv1d in the Pooled MHA"
-                        "and input pooling of each Modality Adapter layer."}
-    )
-    stride: int = field(
-        default=8,
-        metadata={"help": "stride of each Conv1d in the Pooled MHA"
-                        "and input pooling of each Modality Adapter layer."}
-    )
-    # NOTE: couldnt find a proper way to inherit them with II from the encoder
-    embed_dim: int = field(
-        default=1024,
-        metadata={"help": "model dimensionality"}
-    )
-    ffn_embed_dim: int = field(
-        default=4096,
-        metadata={"help": "feed-forward layer dimensionality"}
-    )
-    attention_heads: int = field(
-        default=16,
-        metadata={"help": "activation function"}
-    )
-    activation_fn: str = field(
-        default="gelu",
-        metadata={"help": "activation function"}
-    )
-    # NOTE: no information on dropout rates on the paper
-    # I guess we can use the same as in the rest of the model
-    dropout: float = field(
-        default=0.1,
-        metadata={"help": "dropout rate"}
-    )
-    activation_dropout: float = field(
-        default=0.1,
-        metadata={"help": "dropout rate after the activation function"}
-    )
-    attention_dropout: float = field(
-        default=0.1,
-        metadata={"help": "dropout rate after in the Pooled MHA"}
-    )
-    # NOTE: in figure(1) it seems they use post-LN
-    # but I think it should be pre-LN because both wav2vec and mbart are pre-LN
-    normalize_before: bool = field(
-        default=True,
-        metadata={"help": "whether to use a pre-LN architecture"}
-    )
 
-    
+
 @dataclass
-class LengthAdaptorConfig(FairseqDataclass):
-    in_channels: int = field(
-        default=1024,
-        metadata={"help": "# of input channels in the Length Adaptor"}
+class CouplingConfig(FairseqDataclass):
+    conv1d_adaptor: Optional[Conv1dAdaptorConfig] = field(
+        default=None,
+        metadata={"help": "Conv1d Length Adaptor configuration"},
     )
-    out_channels: int = field(
-        default=1024,
-        metadata={"help": "# of output channels in the Length Adaptor"}
-    )
-    mid_channels: int = field(
-        default=II("model.encoder.length_adaptor.out_channels"),
-        metadata={"help": "# of intermediate channels in the Length Adaptor"}
-    )
-    num_layers: int = field(
-        default=1,
-        metadata={"help": "# of Conv1d layers"}
-    )
-    kernel_size: int = field(
-        default=3,
-        metadata={"help": "kernel size of each Conv1d in the Length Adaptor"}
-    )
-    stride: int = field(
-        default=2,
-        metadata={"help": "stride of each Conv1d in the Length Adaptor"}
-    )
-    layerdrop: float = field(
-        default=0.0,
-        metadata={"help": "whether to use LayerDrop in the Length Adaptor"}
-    )
-    layernorm: bool = field(
-        default=False,
-        metadata={"help": "whether to use LayerNorm in the Length Adaptor"}
-    )
-    projection: bool = field(
-        default=False,
-        metadata={"help": "whether to apply projections in the Length Adaptor"}
-    )
-    activation_fn: str = field(
-        default="glu",
-        metadata={"help": "activation function"}
+    modality_adapter: Optional[ModalityAdapterConfig] = field(
+        default=None,
+        metadata={"help": "Modality Adapter configuration"},
     )
 
 
@@ -265,15 +183,6 @@ class S2TPretrainedComponentConfig(FairseqDataclass):
 
 @dataclass
 class S2TPretrainedEncoderConfig(S2TPretrainedComponentConfig):
-    length_adaptor: Optional[LengthAdaptorConfig] = field(
-        default=None,
-        metadata={"help": "length adaptor configuration"},
-    )
-    modality_adapter: Optional[S2TModalityAdapterConfig] = field(
-        default=None,
-        metadata={"help": "modality adapter configuration"},
-    )
-
     # Arguments for wav2vec(-ish) encoders
     masking: W2VMaskingConfig = field(
         default_factory=lambda: W2VMaskingConfig(),
@@ -312,6 +221,10 @@ class S2TPretrainedConfig(FairseqDataclass):
         default_factory=lambda: S2TPretrainedEncoderConfig('encoder'),
         metadata={"help": "encoder configuration"},
     )
+    coupling: Optional[CouplingConfig] = field(
+        default=None,
+        metadata={"help": "coupling layers configuration"},
+    )
     decoder: S2TPretrainedDecoderConfig = field(
         default_factory=lambda: S2TPretrainedDecoderConfig('decoder'),
         metadata={"help": "decoder configuration"},
@@ -328,6 +241,7 @@ class S2TPretrainedModel(FairseqEncoderDecoderModel):
     @classmethod
     def build_model(cls, cfg: S2TPretrainedConfig, task: SpeechToTextTask) -> "S2TPretrainedModel":
         encoder = S2TPretrainedComponent.build(cfg.encoder)
+        encoder.add_coupling_modules(cfg.coupling)
         decoder = S2TPretrainedComponent.build(cfg.decoder, task.target_dictionary)
         return cls(encoder, decoder)
 
@@ -366,11 +280,6 @@ class S2TPretrainedComponent:
 
         if component_type == 'encoder':
             component = S2TPretrainedEncoder.get_class(cfg).build(cfg)
-            assert not (safe_hasattr(cfg, "length_adaptor") and safe_hasattr(cfg, "modality_adaptor"))
-            if safe_hasattr(cfg, "length_adaptor") and not safe_hasattr(component, "length_adaptor"):
-                component.add_length_adaptor(cfg.length_adaptor)
-            if safe_hasattr(cfg, "modality_adapter") and not safe_hasattr(component, "modality_adapter"):
-                component.add_modality_adapter(cfg.modality_adapter)
         elif component_type == 'decoder':
             component = S2TPretrainedDecoder.get_class(cfg).build(cfg, dictionary)
         else:
@@ -437,6 +346,7 @@ class S2TPretrainedEncoder(FairseqEncoder, S2TPretrainedComponent):
         
         self.embed_dim = cfg["pre_args"]["model"]["w2v_args"]["model"].encoder_embed_dim
         self.component_type = "ENCODER"
+        self.coupling_modules = nn.ModuleList()
 
     @classmethod
     def get_class(cls, cfg: S2TPretrainedEncoderConfig) -> Type['S2TPretrainedEncoder']:
@@ -457,22 +367,27 @@ class S2TPretrainedEncoder(FairseqEncoder, S2TPretrainedComponent):
         cls.update_pre_args(cfg)
         return cls(cfg)
 
-    def add_length_adaptor(self, cfg: LengthAdaptorConfig) -> None:
-        self.length_adaptor = Conv1dAdaptor(
-            in_dim=cfg.in_channels,
-            out_dim=cfg.out_channels,
-            mid_dim=cfg.mid_channels,
-            n_layers=cfg.num_layers,
-            kernel_size=cfg.kernel_size,
-            stride=cfg.stride,
-            layerdrop=cfg.layerdrop,
-            layernorm=cfg.layernorm,
-            proj=cfg.projection,
-            activation_fn=cfg.activation_fn,
-        )
-        
-    def add_modality_adapter(self, cfg: S2TModalityAdapterConfig) -> None:
-        self.modality_adapter = ModalityAdapter(cfg)
+    def add_coupling_modules(self, cfg: CouplingConfig) -> None:
+        self.coupling_modules = nn.ModuleList()
+        if cfg.conv1d_adaptor:
+            self.coupling_modules.append(
+                Conv1dAdaptor(
+                    in_dim=cfg.conv1d_adaptor.in_channels,
+                    out_dim=cfg.conv1d_adaptor.out_channels,
+                    mid_dim=cfg.conv1d_adaptor.mid_channels,
+                    n_layers=cfg.conv1d_adaptor.num_layers,
+                    kernel_size=cfg.conv1d_adaptor.kernel_size,
+                    stride=cfg.conv1d_adaptor.stride,
+                    layerdrop=cfg.conv1d_adaptor.layerdrop,
+                    layernorm=cfg.conv1d_adaptor.layernorm,
+                    proj=cfg.conv1d_adaptor.projection,
+                    activation_fn=cfg.conv1d_adaptor.activation_fn,
+                )
+            )
+        if cfg.modality_adapter:
+            self.coupling_modules.append(
+                ModalityAdapter(cfg.modality_adapter)
+            )
 
     def pre_forward(self, src_tokens, src_lengths, **kwargs):
         return {
@@ -488,16 +403,11 @@ class S2TPretrainedEncoder(FairseqEncoder, S2TPretrainedComponent):
 
     def post_forward(self, encoder_out):
         for i, (eo, epm) in enumerate(zip(encoder_out["encoder_out"], encoder_out["encoder_padding_mask"])):
-            if safe_hasattr(self, "length_adaptor"):
-                encoder_out["encoder_out"][i], encoder_out["encoder_padding_mask"][i] = \
-                    self.length_adaptor(eo, epm)
-            elif safe_hasattr(self, "modality_adapter"):
-                lengths = (~epm).sum(dim=1) \
-                    if epm is not None else torch.LongTensor([eo.size(0)] * eo.size(1))
-                encoder_out["encoder_out"][i], encoder_out["encoder_padding_mask"][i] =  \
-                    self.modality_adapter(eo, lengths.to(eo.device))
-            else:
-                pass
+            if safe_hasattr(self, 'coupling_modules'):
+                for module in self.coupling_modules:
+                    eo, epm = module(eo, epm)
+            encoder_out["encoder_out"][i] = eo
+            encoder_out["encoder_padding_mask"][i] = epm
         return encoder_out
     
     def add_adapters(self, cfg: AdaptersConfig) -> None:
@@ -512,6 +422,7 @@ class S2TPretrainedEncoder(FairseqEncoder, S2TPretrainedComponent):
                 transformer_layer.self_attn_adapter = make_adapter(self, cfg)
             if cfg.apply_at_ffn:
                 transformer_layer.ffn_adapter = make_adapter(self, cfg)
+
 
 class PretrainedWav2VecBaseEncoder(S2TPretrainedEncoder):
     """ Base class for pretrained wav2vec(-ish) encoders, including HuBERT """

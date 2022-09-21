@@ -1,5 +1,7 @@
 from functools import partial
 from typing import List, Optional
+from omegaconf import II, DictConfig
+from dataclasses import dataclass, field
 
 import numpy as np
 
@@ -8,8 +10,53 @@ from torch import nn, LongTensor
 
 from fairseq import utils
 from fairseq.data.data_utils import lengths_to_padding_mask
+from fairseq.dataclass import FairseqDataclass
 from fairseq.modules import LayerNorm, MultiheadAttention
 from fairseq.modules.fairseq_dropout import FairseqDropout
+
+
+@dataclass
+class Conv1dAdaptorConfig(FairseqDataclass):
+    in_channels: int = field(
+        default=1024,
+        metadata={"help": "# of input channels in the Conv1d Adaptor"}
+    )
+    out_channels: int = field(
+        default=1024,
+        metadata={"help": "# of output channels in the Conv1d Adaptor"}
+    )
+    mid_channels: int = field(
+        default=II("model.encoder.length_adaptor.out_channels"),
+        metadata={"help": "# of intermediate channels in the Conv1d Adaptor"}
+    )
+    num_layers: int = field(
+        default=1,
+        metadata={"help": "# of Conv1d layers"}
+    )
+    kernel_size: int = field(
+        default=3,
+        metadata={"help": "kernel size of each Conv1d in the Conv1d Adaptor"}
+    )
+    stride: int = field(
+        default=2,
+        metadata={"help": "stride of each Conv1d in the Conv1d Adaptor"}
+    )
+    layerdrop: float = field(
+        default=0.0,
+        metadata={"help": "whether to use LayerDrop in the Conv1d Adaptor"}
+    )
+    layernorm: bool = field(
+        default=False,
+        metadata={"help": "whether to use LayerNorm in the Conv1d Adaptor"}
+    )
+    projection: bool = field(
+        default=False,
+        metadata={"help": "whether to apply projections in the Conv1d Adaptor"}
+    )
+    activation_fn: str = field(
+        default="glu",
+        metadata={"help": "activation function"}
+    )
 
 
 class Conv1dAdaptor(nn.Module):
@@ -97,6 +144,61 @@ class Conv1dAdaptor(nn.Module):
         return x, out_padding_mask
 
 
+@dataclass
+class ModalityAdapterConfig(FairseqDataclass):
+    num_layers: int = field(
+        default=1,
+        metadata={"help": "# of Modality Adapter layers"}
+    )
+    kernel_size: int = field(
+        default=8,
+        metadata={"help": "kernel size of each Conv1d in the Pooled MHA"
+                        "and input pooling of each Modality Adapter layer."}
+    )
+    stride: int = field(
+        default=8,
+        metadata={"help": "stride of each Conv1d in the Pooled MHA"
+                        "and input pooling of each Modality Adapter layer."}
+    )
+    # NOTE: couldnt find a proper way to inherit them with II from the encoder
+    embed_dim: int = field(
+        default=1024,
+        metadata={"help": "model dimensionality"}
+    )
+    ffn_embed_dim: int = field(
+        default=4096,
+        metadata={"help": "feed-forward layer dimensionality"}
+    )
+    attention_heads: int = field(
+        default=16,
+        metadata={"help": "activation function"}
+    )
+    activation_fn: str = field(
+        default="gelu",
+        metadata={"help": "activation function"}
+    )
+    # NOTE: no information on dropout rates on the paper
+    # I guess we can use the same as in the rest of the model
+    dropout: float = field(
+        default=0.1,
+        metadata={"help": "dropout rate"}
+    )
+    activation_dropout: float = field(
+        default=0.1,
+        metadata={"help": "dropout rate after the activation function"}
+    )
+    attention_dropout: float = field(
+        default=0.1,
+        metadata={"help": "dropout rate after in the Pooled MHA"}
+    )
+    # NOTE: in figure(1) it seems they use post-LN
+    # but I think it should be pre-LN because both wav2vec and mbart are pre-LN
+    normalize_before: bool = field(
+        default=True,
+        metadata={"help": "whether to use a pre-LN architecture"}
+    )
+
+
 class PoolingLayer(nn.Module):
     def __init__(self, embed_dim: int, kernel_size: int = 8, stride: int = 8):
         super(PoolingLayer, self).__init__()
@@ -113,14 +215,14 @@ class PoolingLayer(nn.Module):
         return out_lengths
 
     def forward(self, x):
-        x = x.permute(1, 2, 0).contiguous()  # T x B x C-> B x C x T
+        x = x.permute(1, 2, 0).contiguous()  # T x B x C -> B x C x T
         x = self.conv(x)
         x = x.permute(2, 0, 1).contiguous()  # B x C x T -> T x B x C
         return x
 
 
 class MultiHeadPooledAttention(MultiheadAttention):
-    def __init__(self, cfg):
+    def __init__(self, cfg: ModalityAdapterConfig):
         super().__init__(
             embed_dim=cfg.embed_dim,
             num_heads=cfg.attention_heads,
@@ -151,7 +253,7 @@ class MultiHeadPooledAttention(MultiheadAttention):
 
 
 class ModalityAdapterLayer(nn.Module):
-    def __init__(self, cfg):
+    def __init__(self, cfg: ModalityAdapterConfig):
         super().__init__()
 
         self.normalize_before = cfg.normalize_before
@@ -214,7 +316,7 @@ class ModalityAdapterLayer(nn.Module):
 
 
 class ModalityAdapter(nn.Module):
-    def __init__(self, cfg):
+    def __init__(self, cfg: ModalityAdapterConfig):
         super().__init__()
 
         self.layers = nn.ModuleList(
@@ -223,7 +325,10 @@ class ModalityAdapter(nn.Module):
         self.normalize_before = cfg.normalize_before
         self.layer_norm = LayerNorm(cfg.embed_dim)
 
-    def forward(self, x, x_len):
+    def forward(self, x, padding_mask: Optional[torch.Tensor]):
+        x_len = (~padding_mask).sum(dim=1) if padding_mask is not None \
+                else torch.LongTensor([x.size(0)] * x.size(1))
+        x_len = x_len.to(x.device)
         if not self.normalize_before:
             x = self.layer_norm(x)
         for layer in self.layers:

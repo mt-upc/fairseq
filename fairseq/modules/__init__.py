@@ -50,7 +50,12 @@ from .rotary_positional_embedding import RotaryPositionalEmbedding
 from .positional_encoding import (
     RelPositionalEncoding,
 )
-from .length_adaptor import Conv1dAdaptor, ModalityAdapter
+from .length_adaptor import (
+    Conv1dAdaptorConfig,
+    Conv1dAdaptor,
+    ModalityAdapterConfig,
+    ModalityAdapter,
+)
 
 __all__ = [
     "AdaptiveInput",
@@ -102,6 +107,8 @@ __all__ = [
     "RelPositionalEncoding",
     "RotaryPositionalEmbedding",
     "RotaryPositionMultiHeadedAttention",
+    "Conv1dAdaptorConfig",
     "Conv1dAdaptor",
+    "ModalityAdapterConfig",
     "ModalityAdapter",
 ]
