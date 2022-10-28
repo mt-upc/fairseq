@@ -53,14 +53,10 @@ class S2TPerceiverModel(FairseqEncoderDecoderModel):
             help="dropout rate for the inputs (after adding the positional emb)",
         )
         parser.add_argument(
-            "--conv-output-dim",
-            type=str,
-            help="output channels in the conv processor"
+            "--conv-output-dim", type=str, help="output channels in the conv processor"
         )
         parser.add_argument(
-            "--conv-stride",
-            type=int,
-            help="stride in each layer of the conv processor"
+            "--conv-stride", type=int, help="stride in each layer of the conv processor"
         )
         # Transformer
         parser.add_argument(
@@ -291,7 +287,9 @@ def base_architecture(args):
     args.quant_noise_pq = getattr(args, "quant_noise_pq", 0)
     # perceiver and DLA
     args.num_latents = getattr(args, "num_latents", 256)
-    args.dla_train_num_latents = getattr(args, "dla_train_num_latents", args.num_latents)
+    args.dla_train_num_latents = getattr(
+        args, "dla_train_num_latents", args.num_latents
+    )
     args.dla_inf_num_latents = getattr(args, "dla_inf_num_latents", args.num_latents)
 
 

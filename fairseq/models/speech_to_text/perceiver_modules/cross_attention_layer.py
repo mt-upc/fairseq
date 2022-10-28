@@ -20,10 +20,23 @@ class CrossAttentionLayer(nn.Module):
         ffn_embed_dim,
         input_channels,
         activation_fn,
-        dropout=0,
-        activation_dropout=0,
-        attention_dropout=0,
+        dropout=0.0,
+        activation_dropout=0.0,
+        attention_dropout=0.0,
     ):
+        """
+        Args:
+            latent_dim (int): dimensionality of the latent vectors
+                same as model dimensionality
+            ffn_embed_dim (int): hidden dimension in the feed-forward network
+            input_channels (int): dimensionality of the input
+            activation_fn: gelu, relu, ...
+            dropout (float, optional): dropout rate. Defaults to 0.0
+            activation_dropout (float, optional): dropout rate for
+                the activation output. Defaults to 0.0
+            attention_dropout (float, optional): dropout rate for
+                the attention. Defaults to 0.0
+        """
         super().__init__()
 
         self.dropout_module = FairseqDropout(
@@ -59,15 +72,16 @@ class CrossAttentionLayer(nn.Module):
     ) -> Tuple[torch.FloatTensor, torch.FloatTensor]:
         """
         Args:
-            latent_array: functions as the query for the attention
-                [num_latents, batch, latent_dim]
-            input_array: functions as the key and values for the attention
-                [seq_len, batch, latent_dim]
-            input_mask: the mask of the input array (padding)
-                [batch, seq_len]
+            latent_array (torch.FloatTensor): The latent vectors
+                [n x bs x dim]
+            input_array (torch.FloatTensor): The log-Mel spectrograms
+                [m x bs x c]
+            input_mask (torch.BoolTensor): The input mask
+                [m x bs]
+
         Returns:
-            processed latent_array [num_latents, batch, latent_dim]
-            attention weights
+            Tuple[torch.FloatTensor, torch.FloatTensor]: The output
+                of the cross-attention and the cross-attention weights
         """
 
         residual = latent_array

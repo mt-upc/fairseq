@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 
 import math
+from typing import Dict
 
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .cross_attention_layer import CrossAttentionLayer
 from fairseq.data.data_utils import lengths_to_padding_mask
 from fairseq.models import FairseqEncoder
 from fairseq.models.speech_to_text.s2t_transformer import Conv1dSubsampler
@@ -18,8 +18,15 @@ from fairseq.modules import (
     TransformerEncoderLayer,
 )
 
+from .cross_attention_layer import CrossAttentionLayer
+
 
 class S2TPerceiverEncoder(FairseqEncoder):
+    """
+    Adapted Perceiver encoder from https://arxiv.org/abs/2107.14795
+    for speech-to-text tasks
+    """
+
     def __init__(self, args):
         super().__init__(None)
 
@@ -68,7 +75,7 @@ class S2TPerceiverEncoder(FairseqEncoder):
             self.latent_dim,
             args.encoder_ffn_embed_dim,
             self.input_dim,
-            args.activation_fn
+            args.activation_fn,
         )
 
         # latent transformer
@@ -78,8 +85,14 @@ class S2TPerceiverEncoder(FairseqEncoder):
 
         self.final_layer_norm = LayerNorm(self.latent_dim)
 
-    def _forward(self, src_tokens, src_lengths, return_all_hiddens=False):
+    def _forward(
+        self,
+        src_tokens: torch.FloatTensor,
+        src_lengths: torch.LongTensor,
+        return_all_hiddens=False,
+    ) -> Dict:
 
+        bs = src_tokens.size(0)
         encoder_states = []
 
         if hasattr(self, "conv_processor"):
@@ -95,20 +108,24 @@ class S2TPerceiverEncoder(FairseqEncoder):
 
         src_processed = self.processor_dropout(src_processed)
 
-        latents = self.init_latent.expand(
-            self.num_latents, src_processed.size(1), self.latent_dim
-        ).to(device=src_processed.device)
-        
+        latents = self.init_latent.expand(self.num_latents, bs, self.latent_dim).to(
+            device=src_processed.device
+        )
+
+        # DLA-train
         if self.training:
             latents = self.dla_train_selection(latents)
 
-        # cross attention
-        latents, cros_attn_weights = self.cross_attention_layer(latents, src_processed, src_mask)
-        
+        # cross-attention
+        latents, cros_attn_weights = self.cross_attention_layer(
+            latents, src_processed, src_mask
+        )
+
+        # DLA-inf
         if not self.training:
             latents = self.dla_inf_selection(latents, cros_attn_weights)
 
-        # latent attention
+        # self-attention
         for self_attention_layer in self.self_attention_layers:
             latents = self_attention_layer(latents, encoder_padding_mask=None)
             if return_all_hiddens:
@@ -122,7 +139,7 @@ class S2TPerceiverEncoder(FairseqEncoder):
             "encoder_embedding": [],
             "encoder_states": encoder_states,
             "src_tokens": [],
-            "src_lengths": []
+            "src_lengths": [],
         }
 
     def forward(self, src_tokens, src_lengths, return_all_hiddens=False):
@@ -136,15 +153,28 @@ class S2TPerceiverEncoder(FairseqEncoder):
                 src_tokens, src_lengths, return_all_hiddens=return_all_hiddens
             )
         return x
-    
-    def dla_train_selection(self, latents):
-        
+
+    def dla_train_selection(self, latents: torch.FloatTensor) -> torch.FloatTensor:
+        """Selects k of the n latents using Dynamic Latent Access (Training)
+        for each one of the bs examples
+
+        Args:
+            latents (torch.FloatTensor): The initialized latent vectors
+                [n x bs x dim]
+
+        Returns:
+            torch.FloatTensor: The selected k latent vectors
+                [k x bs x dim]
+        """
+
         if self.dla_train_num_latents == self.num_latents:
             return latents
-        
+
         bs = latents.size(1)
-        
+
         dla_train_idx = np.empty(shape=[self.dla_train_num_latents, bs])
+
+        # random selection for each example
         for i in range(bs):
             dla_train_idx[:, i] = np.random.choice(
                 self.num_latents, size=self.dla_train_num_latents, replace=False
@@ -157,40 +187,55 @@ class S2TPerceiverEncoder(FairseqEncoder):
         )
 
         return torch.gather(latents, dim=0, index=dla_train_idx)
-    
-    def dla_inf_selection(self, latents, alpha):
-        
+
+    def dla_inf_selection(
+        self, latents: torch.FloatTensor, alpha: torch.FloatTensor
+    ) -> torch.FloatTensor:
+        """Selects k' of the n latents using Dynamic Latent Access (Inference)
+        for each one of the bs examples
+
+        Args:
+            latents (torch.FloatTensor): the output of the cross-attention with size
+                [n x bs x dim]
+            alpha (torch.FloatTensor): the attention weights from the cross-attention
+                [bs x n x m]
+
+        Returns:
+            torch.FloatTensor: the selected k' latent vectors
+                [k' x bs x dim]
+        """
+
         if self.dla_inf_num_latents == self.num_latents:
             return latents
-        
+
         bs = alpha_norm.size(0)
-        
+
         # L2-normalize
         alpha_norm = F.normalize(alpha, p=2, dim=2)
-        
+
         # absolute cosine similarity matrix
         s = torch.bmm(alpha_norm, alpha_norm.transpose(1, 2))
         s = torch.abs(s)
-        
+
         # easy index
         arng = torch.arange(self.num_latents)
         arng_bs = torch.arange(bs).unsqueeze(-1)
-        
+
         # mask diagonal
         s[:, arng, arng] = -1.0
-        
+
         # select first
         max_s = torch.max(s, dim=2)[0]
         dla_inf_indices = max_s.argmin(dim=1).unsqueeze(1)
-        
+
         # iterative select the rest k'-1
         while dla_inf_indices.size(1) < self.dla_inf_num_latents:
-            max_s = s[arng_bs, dla_inf_indices].max(dim=1)[0] 
+            max_s = s[arng_bs, dla_inf_indices].max(dim=1)[0]
             max_s[arng_bs, dla_inf_indices] = 999_999
             dla_inf_indices = torch.cat(
                 [dla_inf_indices, max_s.argmin(dim=1).unsqueeze(1)], dim=1
             )
-                    
+
         return torch.gather(latents, dim=0, index=dla_inf_indices)
 
     def reorder_encoder_out(self, encoder_out, new_order):
