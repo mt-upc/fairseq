@@ -5,7 +5,6 @@ This repository contains the implementation for the WMT-SLT22 UPC team submissio
 ## First steps
 
 Clone this repository, create the conda environment and install Fairseq:
-
 ```bash
 git clone -b wmt-slt22 git@github.com:mt-upc/fairseq.git
 cd fairseq
@@ -56,3 +55,5 @@ Similarly to the pre-processing steps, we have created a task to generate the pr
   > booktitle = {},
   > year = {2022}
   > }
+
+Check the original Fairseq [README](https://github.com/mt-upc/fairseq/blob/wmt-slt22/README_FAIRSEQ.md) to learn how to use this toolkit.
