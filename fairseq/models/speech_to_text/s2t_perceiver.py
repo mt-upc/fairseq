@@ -253,7 +253,7 @@ def base_architecture(args):
     args.conv_dropout = getattr(args, "conv_dropout", 0)
     args.conv_kernel_sizes = getattr(args, "conv_kernel_sizes", "5,5")
     args.conv_channels = getattr(args, "conv_channels", 1024)
-    args.conv_output_dim = getattr(args, "conv_output_dim", args.embed_dim)
+    args.conv_output_dim = getattr(args, "conv_output_dim", args.encoder_embed_dim)
     args.conv_stride = getattr(args, "conv_stride", 1)
     # Transformer
     args.encoder_embed_dim = getattr(args, "encoder_embed_dim", 512)
@@ -298,7 +298,7 @@ def base_architecture(args):
 @register_model_architecture("s2t_perceiver", "s2t_perceiver_s")
 def perceiver_enc_dec_s(args):
     args.attention_heads = getattr(args, "attention_heads", 4)
-    args.embed_dim = getattr(args, "embed_dim", 256)
+    args.encoder_embed_dim = getattr(args, "encoder_embed_dim", 256)
     base_architecture(args)
 
 

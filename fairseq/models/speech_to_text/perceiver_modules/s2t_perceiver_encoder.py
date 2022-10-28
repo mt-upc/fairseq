@@ -29,7 +29,7 @@ class S2TPerceiverEncoder(FairseqEncoder):
         self.num_latents = args.num_latents
         self.dla_train_num_latents = args.dla_train_num_latents
         self.dla_inf_num_latents = args.dla_inf_num_latents
-        self.latent_dim = args.embed_dim
+        self.latent_dim = args.encoder_embed_dim
 
         # initialize latent vectors
         self.init_latent = nn.Parameter(
@@ -41,7 +41,7 @@ class S2TPerceiverEncoder(FairseqEncoder):
         )
 
         # input processor
-        self.conv_dropout = FairseqDropout(
+        self.processor_dropout = FairseqDropout(
             p=args.conv_dropout, module_name=self.__class__.__name__
         )
         if not args.no_conv:
@@ -103,14 +103,14 @@ class S2TPerceiverEncoder(FairseqEncoder):
             latents = self.dla_train_selection(latents)
 
         # cross attention
-        latents, cros_attn_weights = self.cross_attn_layer(latents, src_processed, src_mask)
+        latents, cros_attn_weights = self.cross_attention_layer(latents, src_processed, src_mask)
         
         if not self.training:
             latents = self.dla_inf_selection(latents, cros_attn_weights)
 
         # latent attention
         for self_attention_layer in self.self_attention_layers:
-            latents = self_attention_layer(latents)
+            latents = self_attention_layer(latents, encoder_padding_mask=None)
             if return_all_hiddens:
                 encoder_states.append(latents)
 
