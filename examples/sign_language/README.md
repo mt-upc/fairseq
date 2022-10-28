@@ -5,6 +5,7 @@ This repository contains the implementation for the WMT-SLT22 UPC team submissio
 ## First steps
 
 Clone this repository, create the conda environment and install Fairseq:
+
 ```bash
 git clone -b wmt-slt22 git@github.com:mt-upc/fairseq.git
 cd fairseq
