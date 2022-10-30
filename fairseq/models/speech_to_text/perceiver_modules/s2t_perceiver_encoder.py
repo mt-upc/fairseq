@@ -208,7 +208,7 @@ class S2TPerceiverEncoder(FairseqEncoder):
         if self.dla_inf_num_latents == self.num_latents:
             return latents
 
-        bs = alpha_norm.size(0)
+        bs = alpha.size(0)
 
         # L2-normalize
         alpha_norm = F.normalize(alpha, p=2, dim=2)
@@ -236,6 +236,11 @@ class S2TPerceiverEncoder(FairseqEncoder):
                 [dla_inf_indices, max_s.argmin(dim=1).unsqueeze(1)], dim=1
             )
 
+        # [bs x k] -> [k x bs x dim]
+        dla_inf_indices = dla_inf_indices.transpose(0, 1).unsqueeze(-1).expand(
+            self.dla_inf_num_latents, bs, self.latent_dim
+        )
+        
         return torch.gather(latents, dim=0, index=dla_inf_indices)
 
     def reorder_encoder_out(self, encoder_out, new_order):
