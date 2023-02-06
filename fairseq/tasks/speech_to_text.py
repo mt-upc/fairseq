@@ -3,19 +3,26 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+import inspect
+import json
 import logging
-from pathlib import Path
 from argparse import Namespace
+from pathlib import Path
 
+import numpy as np
+import torch
+
+from fairseq import metrics, scoring, utils
 from fairseq.data import Dictionary, encoders
-from fairseq.data.audio.audio_utils import get_features_or_waveform
 from fairseq.data.audio.speech_to_text_dataset import (
     S2TDataConfig,
     SpeechToTextDataset,
     SpeechToTextDatasetCreator,
+    get_features_or_waveform,
 )
 from fairseq.tasks import LegacyFairseqTask, register_task
 
+EVAL_BLEU_ORDER = 4
 
 logger = logging.getLogger(__name__)
 
@@ -45,19 +52,23 @@ class SpeechToTextTask(LegacyFairseqTask):
             metavar="N",
             help="max number of tokens in the target sequence",
         )
+        parser.add_argument(
+            "--generation-args",
+            default="{}",
+            help='generation args for bleu/wer scoring, e.g., \'{"beam": 4, "lenpen": 0.6}\', as JSON string',
+        )
+        parser.add_argument(
+            "--generation-print-samples",
+            action="store_true",
+            help="print sample generations during validation step",
+        )
 
     def __init__(self, args, tgt_dict):
         super().__init__(args)
+        self.args = args
         self.tgt_dict = tgt_dict
         self.data_cfg = S2TDataConfig(Path(args.data) / args.config_yaml)
         self.speaker_to_id = self._get_speaker_to_id()
-        if (
-            self.data_cfg.prepend_tgt_lang_tag
-            and self.data_cfg.prepend_bos_and_append_tgt_lang_tag
-        ):
-            raise ValueError(
-                "Please set only one of the two options to avoid adding target token multiple times"
-            )
 
     def _get_speaker_to_id(self):
         speaker_to_id = None
@@ -96,15 +107,13 @@ class SpeechToTextTask(LegacyFairseqTask):
 
     def load_dataset(self, split, epoch=1, combine=False, **kwargs):
         is_train_split = split.startswith("train")
-        pre_tokenizer = self.build_tokenizer(self.args)
-        bpe_tokenizer = self.build_bpe(self.args)
         self.datasets[split] = SpeechToTextDatasetCreator.from_tsv(
             self.args.data,
             self.data_cfg,
             split,
             self.tgt_dict,
-            pre_tokenizer,
-            bpe_tokenizer,
+            self.pre_tokenizer,
+            self.bpe_tokenizer,
             is_train_split=is_train_split,
             epoch=epoch,
             seed=self.args.seed,
@@ -126,7 +135,169 @@ class SpeechToTextTask(LegacyFairseqTask):
         args.input_feat_per_channel = self.data_cfg.input_feat_per_channel
         args.input_channels = self.data_cfg.input_channels
         args.speaker_to_id = self.speaker_to_id
-        return super(SpeechToTextTask, self).build_model(args, from_checkpoint)
+        model = super(SpeechToTextTask, self).build_model(args, from_checkpoint)
+        self.pre_tokenizer = self.build_tokenizer(args)
+        self.bpe_tokenizer = self.build_bpe(args)
+        if args.scoring == "wer" or args.scoring == "sacrebleu":
+            self.scorer = scoring.build_scorer(args, self.tgt_dict)
+            gen_args = json.loads(getattr(args, "generation_args", "{}"))
+            if (
+                self.data_cfg.prepend_tgt_lang_tag
+                and gen_args.get("prefix_size", 0) != 1
+            ):
+                raise ValueError(
+                    'Please set --generation-args {"prefix_size": 1} since '
+                    "target language ID token is prepended as BOS."
+                )
+            self.sequence_generator = self.build_generator(
+                [model], Namespace(**gen_args)
+            )
+        else:
+            logger.info(
+                f"The selected scorer ({args.scoring}) is not available during training."
+                'Please select "wer" or "sacrebleu".'
+            )
+        return model
+
+    def valid_step(self, sample, model, criterion):
+        loss, sample_size, logging_output = super().valid_step(sample, model, criterion)
+
+        if hasattr(self, "scorer"):
+
+            def decode(toks):
+                if hasattr(self.sequence_generator, "symbols_to_strip_from_output"):
+                    to_ignore = self.sequence_generator.symbols_to_strip_from_output
+                else:
+                    to_ignore = {self.sequence_generator.eos}
+                s = self.tgt_dict.string(
+                    toks.int().cpu(), escape_unk=True, extra_symbols_to_ignore=to_ignore
+                )
+                if self.bpe_tokenizer:
+                    s = self.bpe_tokenizer.decode(s)
+                if self.pre_tokenizer:
+                    s = self.pre_tokenizer.decode(s)
+                return s
+
+            # for joint-speech task
+            # generate only for the speech input
+            if "src_txt_tokens" in sample["net_input"].keys():
+                sample["net_input"]["src_txt_tokens"] = None
+                sample["net_input"]["src_txt_lengths"] = None
+
+            prefix_tokens = (
+                sample["target"][:, 0].unsqueeze(1)
+                if self.data_cfg.prepend_tgt_lang_tag
+                else None
+            )
+            gen_out = self.inference_step(
+                self.sequence_generator, [model], sample, prefix_tokens=prefix_tokens
+            )
+            refs, preds = [], []
+            for i in range(len(gen_out)):
+                ref_tok = (
+                    utils.strip_pad(sample["target"][i], self.tgt_dict.pad())
+                    .int()
+                    .cpu()
+                )
+                pred_tok = gen_out[i][0]["tokens"].int().cpu()
+                if self.data_cfg.prepend_tgt_lang_tag:
+                    ref_tok = ref_tok[1:]
+                    pred_tok = pred_tok[1:]
+                ref = decode(ref_tok)
+                pred = decode(pred_tok)
+                refs.append(ref)
+                preds.append(pred)
+
+            if self.args.generation_print_samples:
+                logger.info("example hypothesis: " + pred)
+                logger.info("example reference: " + ref)
+
+            if self.args.scoring == "sacrebleu":
+                bleu = self.scorer.sacrebleu.corpus_bleu(preds, [refs])
+                logging_output["_bleu_sys_len"] = bleu.sys_len
+                logging_output["_bleu_ref_len"] = bleu.ref_len
+                for i in range(EVAL_BLEU_ORDER):
+                    logging_output["_bleu_counts_" + str(i)] = bleu.counts[i]
+                    logging_output["_bleu_totals_" + str(i)] = bleu.totals[i]
+
+            if self.args.scoring == "wer":
+                distance, ref_length = 0, 0
+                for ref, pred in zip(refs, preds):
+                    ref_items = self.scorer.tokenizer.tokenize(ref).split()
+                    pred_items = self.scorer.tokenizer.tokenize(pred).split()
+                    distance += self.scorer.ed.eval(ref_items, pred_items)
+                    ref_length += len(ref_items)
+                logging_output["_wer_distance"] = distance
+                logging_output["_wer_ref_len"] = ref_length
+
+        return loss, sample_size, logging_output
+
+    def reduce_metrics(self, logging_outputs, criterion):
+        super().reduce_metrics(logging_outputs, criterion)
+
+        if hasattr(self, "scorer"):
+
+            def sum_logs(key):
+                result = sum(log.get(key, 0) for log in logging_outputs)
+                if torch.is_tensor(result):
+                    result = result.cpu()
+                return result
+
+            if self.args.scoring == "sacrebleu":
+                counts, totals = [], []
+                for i in range(EVAL_BLEU_ORDER):
+                    counts.append(sum_logs("_bleu_counts_" + str(i)))
+                    totals.append(sum_logs("_bleu_totals_" + str(i)))
+
+                if max(totals) > 0:
+                    # log counts as numpy arrays -- log_scalar will sum them correctly
+                    metrics.log_scalar("_bleu_counts", np.array(counts))
+                    metrics.log_scalar("_bleu_totals", np.array(totals))
+                    metrics.log_scalar("_bleu_sys_len", sum_logs("_bleu_sys_len"))
+                    metrics.log_scalar("_bleu_ref_len", sum_logs("_bleu_ref_len"))
+
+                    def compute_bleu(meters):
+                        try:
+                            comp_bleu = self.scorer.sacrebleu.BLEU.compute_bleu
+                        except AttributeError:
+                            # compatibility API for sacrebleu 1.x
+                            comp_bleu = self.scorer.sacrebleu.compute_bleu
+
+                        fn_sig = inspect.getfullargspec(comp_bleu)[0]
+                        if "smooth_method" in fn_sig:
+                            smooth = {"smooth_method": "exp"}
+                        else:
+                            smooth = {"smooth": "exp"}
+                        bleu = comp_bleu(
+                            correct=meters["_bleu_counts"].sum,
+                            total=meters["_bleu_totals"].sum,
+                            sys_len=meters["_bleu_sys_len"].sum
+                            if torch.is_tensor(meters["_bleu_sys_len"].sum) == False
+                            else meters["_bleu_sys_len"].sum.long().item(),
+                            ref_len=meters["_bleu_ref_len"].sum
+                            if torch.is_tensor(meters["_bleu_ref_len"].sum) == False
+                            else meters["_bleu_ref_len"].sum.long().item(),
+                            **smooth,
+                        )
+                        return round(bleu.score, 2)
+
+                    metrics.log_derived("sacrebleu", compute_bleu)
+
+            if self.args.scoring == "wer":
+                metrics.log_scalar("_wer_distance", sum_logs("_wer_distance"))
+                metrics.log_scalar("_wer_ref_len", sum_logs("_wer_ref_len"))
+
+                def compute_wer(meters):
+                    ref_len = meters["_wer_ref_len"].sum
+                    if ref_len > 0:
+                        wer = meters["_wer_distance"].sum / ref_len
+                        if torch.is_tensor(wer):
+                            wer = wer.cpu().item()
+                        return round(100 * wer, 2)
+                    else:
+                        return 0
+
+                metrics.log_derived("wer", compute_wer)
 
     def build_generator(
         self,
@@ -149,20 +320,6 @@ class SpeechToTextTask(LegacyFairseqTask):
         if extra_gen_cls_kwargs is None:
             extra_gen_cls_kwargs = {}
         extra_gen_cls_kwargs["symbols_to_strip_from_output"] = lang_token_ids
-
-        eos_token = (
-            args.eos_token
-            if "eos_token" in args and args.eos_token is not None
-            else self.data_cfg.config.get("eos_token", None)
-        )
-
-        if self.data_cfg.prepend_bos_and_append_tgt_lang_tag and not eos_token:
-            raise Warning(
-                "Please provide --eos_token to replace eos in sequence generator"
-            )
-
-        eos_id = self.tgt_dict.index(eos_token) if eos_token else None
-        extra_gen_cls_kwargs["eos"] = eos_id
 
         return super().build_generator(
             models, args, seq_gen_cls=None, extra_gen_cls_kwargs=extra_gen_cls_kwargs
