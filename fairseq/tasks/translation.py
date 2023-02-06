@@ -12,7 +12,9 @@ from typing import Optional
 from argparse import Namespace
 from omegaconf import II
 
+import sacrebleu
 import numpy as np
+import yaml
 from fairseq import metrics, utils
 from fairseq.data import (
     AppendTokenDataset,
@@ -262,19 +264,35 @@ class TranslationConfig(FairseqDataclass):
     eval_bleu_print_samples: bool = field(
         default=False, metadata={"help": "print sample generations during validation"}
     )
+    eval_bleu_document_level: bool = field(
+        default=False, metadata={"help": "whether to evaluate BLEU on the document level"}
+    )
+    eval_bleu_document_level_ref_segmentation: str = field(
+        default="", metadata={
+            "help": "the path to the reference segmentation for the document-level translations"}
+    )
+    eval_bleu_document_level_ref_text: str = field(
+        default="", metadata={
+            "help": "the path to the sentence-level references for the document-level translations"}
+    )
+    eval_bleu_document_level_hyp_segmentation: str = field(
+        default="", metadata={
+            "help": "the path to the hypothesis segmentation for the document-level translations"}
+    )
+    eval_bleu_document_level_valid_path: str = field(
+        default="", metadata={
+            "help": "the path to the directory of the binarized validation split"}
+    )
 
 
 @register_task("translation", dataclass=TranslationConfig)
 class TranslationTask(FairseqTask):
     """
     Translate from one (source) language to another (target) language.
-
     Args:
         src_dict (~fairseq.data.Dictionary): dictionary for the source language
         tgt_dict (~fairseq.data.Dictionary): dictionary for the target language
-
     .. note::
-
         The translation task is compatible with :mod:`fairseq-train`,
         :mod:`fairseq-generate` and :mod:`fairseq-interactive`.
     """
@@ -285,11 +303,15 @@ class TranslationTask(FairseqTask):
         super().__init__(cfg)
         self.src_dict = src_dict
         self.tgt_dict = tgt_dict
+        
+        if cfg.eval_bleu_document_level:
+            ref_sentences, ref_segments, self.hyp_segments =  self._load_doc_level_data()
+            self.ref_docs = self._get_docs(ref_sentences, ref_segments)
+            self.hyp_sentences, self.hyp_sentence_ids = [], []
 
     @classmethod
     def setup_task(cls, cfg: TranslationConfig, **kwargs):
         """Setup the task (e.g., load dictionaries).
-
         Args:
             args (argparse.Namespace): parsed command-line arguments
         """
@@ -321,7 +343,6 @@ class TranslationTask(FairseqTask):
 
     def load_dataset(self, split, epoch=1, combine=False, **kwargs):
         """Load a given dataset split.
-
         Args:
             split (str): name of the split (e.g., train, valid, test)
         """
@@ -334,6 +355,9 @@ class TranslationTask(FairseqTask):
 
         # infer langcode
         src, tgt = self.cfg.source_lang, self.cfg.target_lang
+        
+        if split != self.cfg.train_subset and self.cfg.eval_bleu_document_level:
+            data_path = self.cfg.eval_bleu_document_level_valid_path
 
         self.datasets[split] = load_langpair_dataset(
             data_path,
@@ -352,9 +376,9 @@ class TranslationTask(FairseqTask):
             load_alignments=self.cfg.load_alignments,
             truncate_source=self.cfg.truncate_source,
             num_buckets=self.cfg.num_batch_buckets,
-            shuffle=(split != "test"),
+            shuffle=(split == self.cfg.train_subset),
             pad_to_multiple=self.cfg.required_seq_len_multiple,
-        )
+        )            
 
     def build_dataset_for_inference(self, src_tokens, src_lengths, constraints=None):
         return LanguagePairDataset(
@@ -367,7 +391,7 @@ class TranslationTask(FairseqTask):
 
     def build_model(self, cfg, from_checkpoint=False):
         model = super().build_model(cfg, from_checkpoint)
-        if self.cfg.eval_bleu:
+        if self.cfg.eval_bleu or self.cfg.eval_bleu_document_level:
             detok_args = json.loads(self.cfg.eval_bleu_detok_args)
             self.tokenizer = encoders.build_tokenizer(
                 Namespace(tokenizer=self.cfg.eval_bleu_detok, **detok_args)
@@ -380,8 +404,13 @@ class TranslationTask(FairseqTask):
         return model
 
     def valid_step(self, sample, model, criterion):
-        loss, sample_size, logging_output = super().valid_step(sample, model, criterion)
-        if self.cfg.eval_bleu:
+        if self.cfg.eval_bleu_document_level:
+            hyps, ids = self._inference_for_doc_bleu(self.sequence_generator, sample, model)
+            self.hyp_sentences.extend(hyps)
+            self.hyp_sentence_ids.extend(ids)
+            loss, sample_size, logging_output = 0, 1, {}
+        elif self.cfg.eval_bleu:
+            loss, sample_size, logging_output = super().valid_step(sample, model, criterion)
             bleu = self._inference_with_bleu(self.sequence_generator, sample, model)
             logging_output["_bleu_sys_len"] = bleu.sys_len
             logging_output["_bleu_ref_len"] = bleu.ref_len
@@ -394,8 +423,28 @@ class TranslationTask(FairseqTask):
         return loss, sample_size, logging_output
 
     def reduce_metrics(self, logging_outputs, criterion):
-        super().reduce_metrics(logging_outputs, criterion)
-        if self.cfg.eval_bleu:
+        
+        if self.cfg.eval_bleu_document_level:
+            
+            n_samples = len(self.hyp_sentences)
+            if n_samples == len(self.hyp_segments):
+                self.hyp_sentences = [sent for _, sent in sorted(zip(self.hyp_sentence_ids, self.hyp_sentences))]
+                hyp_docs = self._get_docs(self.hyp_sentences, self.hyp_segments)
+                assert len(hyp_docs) == len(self.ref_docs)
+                assert set(hyp_docs.keys()) == set(self.ref_docs.keys())
+                refs = list(self.ref_docs.values())
+                hyps = [hyp_docs[id_] for id_ in self.ref_docs.keys()]
+                bleu = sacrebleu.corpus_bleu(hyps, [refs])
+                logger.info(bleu)
+                metrics.log_scalar("bleu", bleu.score, round=2)
+                self.hyp_sentences, self.hyp_sentence_ids = [], []
+            elif n_samples > 0:
+                pass
+            else:
+                super().reduce_metrics(logging_outputs, criterion)
+            
+        elif self.cfg.eval_bleu:
+            super().reduce_metrics(logging_outputs, criterion)
 
             def sum_logs(key):
                 import torch
@@ -445,6 +494,8 @@ class TranslationTask(FairseqTask):
                     return round(bleu.score, 2)
 
                 metrics.log_derived("bleu", compute_bleu)
+        else:
+            super().reduce_metrics(logging_outputs, criterion)
 
     def max_positions(self):
         """Return the max sentence length allowed by the task."""
@@ -459,31 +510,29 @@ class TranslationTask(FairseqTask):
     def target_dictionary(self):
         """Return the target :class:`~fairseq.data.Dictionary`."""
         return self.tgt_dict
+    
+    def decode_string(self, toks, escape_unk=False):
+        s = self.tgt_dict.string(
+            toks.int().cpu(),
+            self.cfg.eval_bleu_remove_bpe,
+            # The default unknown string in fairseq is `<unk>`, but
+            # this is tokenized by sacrebleu as `< unk >`, inflating
+            # BLEU scores. Instead, we use a somewhat more verbose
+            # alternative that is unlikely to appear in the real
+            # reference, but doesn't get split into multiple tokens.
+            unk_string=("UNKNOWNTOKENINREF" if escape_unk else "UNKNOWNTOKENINHYP"),
+        )
+        if self.tokenizer:
+            s = self.tokenizer.decode(s)
+        return s
 
     def _inference_with_bleu(self, generator, sample, model):
-        import sacrebleu
-
-        def decode(toks, escape_unk=False):
-            s = self.tgt_dict.string(
-                toks.int().cpu(),
-                self.cfg.eval_bleu_remove_bpe,
-                # The default unknown string in fairseq is `<unk>`, but
-                # this is tokenized by sacrebleu as `< unk >`, inflating
-                # BLEU scores. Instead, we use a somewhat more verbose
-                # alternative that is unlikely to appear in the real
-                # reference, but doesn't get split into multiple tokens.
-                unk_string=("UNKNOWNTOKENINREF" if escape_unk else "UNKNOWNTOKENINHYP"),
-            )
-            if self.tokenizer:
-                s = self.tokenizer.decode(s)
-            return s
-
         gen_out = self.inference_step(generator, [model], sample, prefix_tokens=None)
         hyps, refs = [], []
         for i in range(len(gen_out)):
-            hyps.append(decode(gen_out[i][0]["tokens"]))
+            hyps.append(self.decode_string(gen_out[i][0]["tokens"]))
             refs.append(
-                decode(
+                self.decode_string(
                     utils.strip_pad(sample["target"][i], self.tgt_dict.pad()),
                     escape_unk=True,  # don't count <unk> as matches to the hypo
                 )
@@ -495,3 +544,42 @@ class TranslationTask(FairseqTask):
             return sacrebleu.corpus_bleu(hyps, [refs], tokenize="none")
         else:
             return sacrebleu.corpus_bleu(hyps, [refs])
+
+    def _inference_for_doc_bleu(self, generator, sample, model):
+        gen_out = self.inference_step(generator, [model], sample, prefix_tokens=None)
+        hyps = [self.decode_string(gen_out[i][0]["tokens"]) for i in range(len(gen_out))]
+        ids = [sample["id"][i].item() for i in range(len(gen_out))]
+        return hyps, ids
+    
+    def _load_doc_level_data(self):
+        with open(self.cfg.eval_bleu_document_level_ref_text, "r") as f:
+            ref_sentences = f.read().splitlines()
+        with open(self.cfg.eval_bleu_document_level_ref_segmentation, "r") as f:
+            ref_segments = yaml.load(f, Loader=yaml.CLoader)
+        with open(self.cfg.eval_bleu_document_level_hyp_segmentation, "r") as f:
+            hyp_segments = yaml.load(f, Loader=yaml.CLoader)
+        
+        ref_ids = set([sgm["wav"] for sgm in ref_segments])
+        hyp_ids = set([sgm["wav"] for sgm in hyp_segments])
+        common_ids = ref_ids.intersection(hyp_ids)
+        
+        new_ref_sentences, new_ref_segments, new_hyp_segments = [], [], []
+        for ref_sent, ref_sgm in zip(ref_sentences, ref_segments):
+            if ref_sgm["wav"] in common_ids:
+                new_ref_sentences.append(ref_sent)
+                new_ref_segments.append(ref_sgm)
+        for hyp_sgm in hyp_segments:
+            if hyp_sgm["wav"] in common_ids:
+                new_hyp_segments.append(hyp_sgm)
+                
+        return new_ref_sentences, new_ref_segments, new_hyp_segments
+    
+    def _get_docs(self, sentences, segments):
+        docs = {}
+        for sent, sgm in zip(sentences, segments):
+            if sgm["wav"] not in docs.keys():
+                docs[sgm["wav"]] = [sent]
+            else:
+                docs[sgm["wav"]].append(sent)
+        docs = {id_: " ".join(doc) for id_, doc in docs.items()}
+        return docs
