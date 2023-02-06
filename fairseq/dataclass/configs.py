@@ -736,6 +736,15 @@ class CheckpointConfig(FairseqDataclass):
             "help": 'select the largest metric value for saving "best" checkpoints'
         },
     )
+    early_stop_metric: str = field(
+        default="loss", metadata={"help": 'metric to use for early stopping'}
+    )
+    maximize_early_stop_metric: bool = field(
+        default=False,
+        metadata={
+            "help": 'small values indicate early stopping'
+        },
+    )
     patience: int = field(
         default=-1,
         metadata={
