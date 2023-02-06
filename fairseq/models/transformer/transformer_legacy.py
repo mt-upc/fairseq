@@ -219,6 +219,32 @@ def base_architecture(args):
     args.quant_noise_pq = getattr(args, "quant_noise_pq", 0)
     args.quant_noise_pq_block_size = getattr(args, "quant_noise_pq_block_size", 8)
     args.quant_noise_scalar = getattr(args, "quant_noise_scalar", 0)
+    
+    
+@register_model_architecture("transformer", "transformer_s")
+def transformer_iwslt_de_en(args):
+    args.encoder_embed_dim = getattr(args, "encoder_embed_dim", 256)
+    args.encoder_ffn_embed_dim = getattr(args, "encoder_ffn_embed_dim", 1024)
+    args.encoder_attention_heads = getattr(args, "encoder_attention_heads", 4)
+    args.decoder_attention_heads = getattr(args, "decoder_attention_heads", 4)
+    args.decoder_embed_dim = getattr(args, "decoder_embed_dim", 256)
+    args.decoder_ffn_embed_dim = getattr(args, "decoder_ffn_embed_dim", 1024)
+    args.encoder_normalize_before = getattr(args, "encoder_normalize_before", True)
+    args.decoder_normalize_before = getattr(args, "decoder_normalize_before", True)
+    base_architecture(args)
+
+
+@register_model_architecture("transformer", "transformer_m")
+def transformer_iwslt_de_en(args):
+    args.encoder_embed_dim = getattr(args, "encoder_embed_dim", 512)
+    args.encoder_ffn_embed_dim = getattr(args, "encoder_ffn_embed_dim", 2048)
+    args.encoder_attention_heads = getattr(args, "encoder_attention_heads", 8)
+    args.decoder_attention_heads = getattr(args, "decoder_attention_heads", 8)
+    args.decoder_embed_dim = getattr(args, "decoder_embed_dim", 512)
+    args.decoder_ffn_embed_dim = getattr(args, "decoder_ffn_embed_dim", 2048)
+    args.encoder_normalize_before = getattr(args, "encoder_normalize_before", True)
+    args.decoder_normalize_before = getattr(args, "decoder_normalize_before", True)
+    base_architecture(args)
 
 
 @register_model_architecture("transformer", "transformer_iwslt_de_en")
