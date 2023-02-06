@@ -3,11 +3,14 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+import os
 import csv
 from pathlib import Path
 import zipfile
 from functools import reduce
-from multiprocessing import cpu_count
+from multiprocessing import cpu_count, Pool
+from functools import partial
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from typing import Any, Dict, List, Optional, Union
 import io
 
@@ -98,6 +101,14 @@ def extract_fbank_features(
     return features
 
 
+def _load_files(paths: List[Path]):
+    data = list()
+    for path in paths:
+        with open(path, 'rb') as handle:
+            data.append(handle.read())
+    return paths, data
+
+
 def create_zip(data_root: Path, zip_path: Path):
     paths = list(data_root.glob("*.npy"))
     paths.extend(data_root.glob("*.flac"))
@@ -106,31 +117,41 @@ def create_zip(data_root: Path, zip_path: Path):
             f.write(path, arcname=path.name)
 
 
+def _get_utt_length(_zip_path: Path, is_audio: bool, utt: Dict[str, Union[str, int]]):
+    with open(_zip_path, "rb") as f:
+        f.seek(utt['offset'])
+        byte_data = f.read(utt['file_size'])
+        assert len(byte_data) > 1
+        if is_audio:
+            assert is_sf_audio_data(byte_data), utt['utt_id']
+        else:
+            assert is_npy_data(byte_data), utt['utt_id']
+        byte_data_fp = io.BytesIO(byte_data)
+        if is_audio:
+            return sf.info(byte_data_fp).frames
+        else:
+            return np.load(byte_data_fp).shape[0]
+
+
 def get_zip_manifest(
-        zip_path: Path, zip_root: Optional[Path] = None, is_audio=False
+        zip_path: Path, zip_root: Optional[Path] = None, is_audio=False, chunksize=100, num_workers=None
 ):
     _zip_path = Path.joinpath(zip_root or Path(""), zip_path)
     with zipfile.ZipFile(_zip_path, mode="r") as f:
         info = f.infolist()
-    paths, lengths = {}, {}
-    for i in tqdm(info):
-        utt_id = Path(i.filename).stem
-        offset, file_size = i.header_offset + 30 + len(i.filename), i.file_size
-        paths[utt_id] = f"{zip_path.as_posix()}:{offset}:{file_size}"
-        with open(_zip_path, "rb") as f:
-            f.seek(offset)
-            byte_data = f.read(file_size)
-            assert len(byte_data) > 1
-            if is_audio:
-                assert is_sf_audio_data(byte_data), i
-            else:
-                assert is_npy_data(byte_data), i
-            byte_data_fp = io.BytesIO(byte_data)
-            if is_audio:
-                lengths[utt_id] = sf.info(byte_data_fp).frames
-            else:
-                lengths[utt_id] = np.load(byte_data_fp).shape[0]
-    return paths, lengths
+    df = pd.DataFrame(info, columns=['zip_info'])
+    df['utt_id'] = df.zip_info.apply(lambda x: Path(x.filename).stem)
+    df['offset'] = df.zip_info.apply(lambda x: x.header_offset + 30 + len(x.filename))
+    df['file_size'] = df.zip_info.apply(lambda x: x.file_size)
+    df['path'] = df.apply(lambda x: f"{zip_path.as_posix()}:{x.offset}:{x.file_size}", axis=1)
+    _get_utt_length_ = partial(_get_utt_length, _zip_path, is_audio)
+    if num_workers is None:
+        num_workers = len(os.sched_getaffinity(0))
+    with Pool(num_workers) as p:
+        df['length'] = list(tqdm(p.imap(
+            _get_utt_length_, df.to_dict('records'), chunksize=chunksize
+        ), total=len(df)))
+    return dict(zip(df.utt_id, df.path)), dict(zip(df.utt_id, df.length))
 
 
 def gen_config_yaml(
@@ -153,7 +174,7 @@ def gen_config_yaml(
     assert spm_filename is not None or vocab_name is not None
     vocab_name = spm_filename.replace(".model", ".txt") if vocab_name is None \
         else vocab_name
-    writer.set_vocab_filename(vocab_name)
+    writer.set_vocab_filename((manifest_root / vocab_name).as_posix())
     if input_channels is not None:
         writer.set_input_channels(input_channels)
     if input_feat_per_channel is not None:

@@ -65,7 +65,7 @@ class mTEDx(Dataset):
                 "Please install PyYAML to load the Multilingual TEDx YAML files"
             )
         with open(txt_root / f"{split}.yaml") as f:
-            segments = yaml.load(f, Loader=yaml.BaseLoader)
+            segments = yaml.load(f, Loader=yaml.CLoader)
         # Load source and target utterances
         src, tgt = lang.split("-")
         for _lang in [src, tgt]:

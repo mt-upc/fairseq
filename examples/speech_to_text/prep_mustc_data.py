@@ -61,7 +61,7 @@ class MUSTC(Dataset):
         except ImportError:
             print("Please install PyYAML to load the MuST-C YAML files")
         with open(txt_root / f"{split}.yaml") as f:
-            segments = yaml.load(f, Loader=yaml.BaseLoader)
+            segments = yaml.load(f, Loader=yaml.CLoader)
         # Load source and target utterances
         for _lang in ["en", lang]:
             with open(txt_root / f"{split}.{_lang}") as f:
@@ -71,7 +71,7 @@ class MUSTC(Dataset):
                 segments[i][_lang] = u
         # Gather info
         self.data = []
-        for wav_filename, _seg_group in groupby(segments, lambda x: x["wav"]):
+        for wav_filename, _seg_group in tqdm(groupby(segments, lambda x: x["wav"])):
             wav_path = wav_root / wav_filename
             sample_rate = sf.info(wav_path.as_posix()).samplerate
             seg_group = sorted(_seg_group, key=lambda x: x["offset"])
@@ -113,48 +113,53 @@ def process(args):
             print(f"{cur_root.as_posix()} does not exist. Skipped.")
             continue
         # Extract features
-        audio_root = cur_root / ("flac" if args.use_audio_input else "fbank80")
-        audio_root.mkdir(exist_ok=True)
-
-        for split in MUSTC.SPLITS:
-            print(f"Fetching split {split}...")
-            dataset = MUSTC(root.as_posix(), lang, split)
-            if args.use_audio_input:
-                print("Converting audios...")
-                for waveform, sample_rate, _, _, _, utt_id in tqdm(dataset):
-                    tgt_sample_rate = 16_000
-                    _wavform, _ = convert_waveform(
-                        waveform, sample_rate, to_mono=True,
-                        to_sample_rate=tgt_sample_rate
-                    )
-                    sf.write(
-                        (audio_root / f"{utt_id}.flac").as_posix(),
-                        _wavform.T.numpy(), tgt_sample_rate
-                    )
-            else:
-                print("Extracting log mel filter bank features...")
-                gcmvn_feature_list = []
-                if split == 'train' and args.cmvn_type == "global":
-                    print("And estimating cepstral mean and variance stats...")
-
-                for waveform, sample_rate, _, _, _, utt_id in tqdm(dataset):
-                    features = extract_fbank_features(
-                        waveform, sample_rate, audio_root / f"{utt_id}.npy"
-                    )
-                    if split == 'train' and args.cmvn_type == "global":
-                        if len(gcmvn_feature_list) < args.gcmvn_max_num:
-                            gcmvn_feature_list.append(features)
-
-                if split == 'train' and args.cmvn_type == "global":
-                    # Estimate and save cmv
-                    stats = cal_gcmvn_stats(gcmvn_feature_list)
-                    with open(cur_root / "gcmvn.npz", "wb") as f:
-                        np.savez(f, mean=stats["mean"], std=stats["std"])
-
-        # Pack features into ZIP
+        sub = "flac" if args.use_audio_input else "fbank80"
+        if "train" not in MUSTC.SPLITS:
+            sub += "_dev_test"
+        audio_root = cur_root / sub
         zip_path = cur_root / f"{audio_root.name}.zip"
-        print("ZIPing audios/features...")
-        create_zip(audio_root, zip_path)
+        
+        if not zip_path.is_file():
+            audio_root.mkdir(exist_ok=True)
+            for split in MUSTC.SPLITS:
+                print(f"Fetching split {split}...")
+                dataset = MUSTC(root.as_posix(), lang, split)
+                if args.use_audio_input:
+                    print("Converting audios...")
+                    for waveform, sample_rate, _, _, _, utt_id in tqdm(dataset):
+                        tgt_sample_rate = 16_000
+                        _wavform, _ = convert_waveform(
+                            waveform, sample_rate, to_mono=True,
+                            to_sample_rate=tgt_sample_rate
+                        )
+                        sf.write(
+                            (audio_root / f"{utt_id}.flac").as_posix(),
+                            _wavform.T.numpy(), tgt_sample_rate
+                        )
+                else:
+                    print("Extracting log mel filter bank features...")
+                    gcmvn_feature_list = []
+                    if split == 'train' and args.cmvn_type == "global":
+                        print("And estimating cepstral mean and variance stats...")
+
+                    for waveform, sample_rate, _, _, _, utt_id in tqdm(dataset):
+                        features = extract_fbank_features(
+                            waveform, sample_rate, audio_root / f"{utt_id}.npy"
+                        )
+                        if split == 'train' and args.cmvn_type == "global":
+                            if len(gcmvn_feature_list) < args.gcmvn_max_num:
+                                gcmvn_feature_list.append(features)
+
+                    if split == 'train' and args.cmvn_type == "global":
+                        # Estimate and save cmv
+                        stats = cal_gcmvn_stats(gcmvn_feature_list)
+                        with open(cur_root / "gcmvn.npz", "wb") as f:
+                            np.savez(f, mean=stats["mean"], std=stats["std"])
+
+            # Pack features into ZIP
+            print("ZIPing audios/features...")
+            create_zip(audio_root, zip_path)
+            
         print("Fetching ZIP manifest...")
         audio_paths, audio_lengths = get_zip_manifest(
             zip_path,
@@ -214,7 +219,8 @@ def process(args):
                 ),
             )
         # Clean up
-        shutil.rmtree(audio_root)
+        if audio_root.is_dir():
+            shutil.rmtree(audio_root)
 
 
 def process_joint(args):
