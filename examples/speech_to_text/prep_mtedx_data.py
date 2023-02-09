@@ -114,7 +114,7 @@ class mTEDx(Dataset):
 
 def process(args):
     root = Path(args.data_root).absolute()
-    for lang in mTEDx.LANGPAIRS:
+    for lang in args.lang_pairs:
         cur_root = root / f"{lang}"
         if not cur_root.is_dir():
             print(f"{cur_root.as_posix()} does not exist. Skipped.")
@@ -259,6 +259,8 @@ def main():
     parser.add_argument("--task", type=str, choices=["asr", "st"])
     parser.add_argument("--joint", action="store_true", help="")
     parser.add_argument("--use-audio-input", action="store_true")
+    parser.add_argument("--lang-pairs", type=str, required=True,
+        help="Comma-separated list of language pairs to process.")
     args = parser.parse_args()
 
     if args.joint:
