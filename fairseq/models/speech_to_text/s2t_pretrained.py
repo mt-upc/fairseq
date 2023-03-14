@@ -241,7 +241,8 @@ class S2TPretrainedModel(FairseqEncoderDecoderModel):
     @classmethod
     def build_model(cls, cfg: S2TPretrainedConfig, task: SpeechToTextTask) -> "S2TPretrainedModel":
         encoder = S2TPretrainedComponent.build(cfg.encoder)
-        encoder.add_coupling_modules(cfg.coupling)
+        if safe_hasattr(cfg, 'coupling'):
+            encoder.add_coupling_modules(cfg.coupling)
         decoder = S2TPretrainedComponent.build(cfg.decoder, task.target_dictionary)
         return cls(encoder, decoder)
 
