@@ -3,7 +3,6 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
-import json
 import logging
 from pathlib import Path
 from argparse import Namespace
@@ -146,32 +145,45 @@ class SpeechToTextTask(FairseqTask):
     def __init__(self, cfg, tgt_dict):
         super().__init__(cfg)
         self.tgt_dict = tgt_dict
-        self.data_cfg = S2TDataConfig(Path(cfg.data) / cfg.data_config_yaml)
+        try:
+            self.data_cfg = S2TDataConfig(Path(cfg.data) / cfg.data_config_yaml)
+        except AttributeError:
+            # compatibility with siamese pre-training
+            self.data_cfg = S2TDataConfig(Path(cfg.data) / cfg.config_yaml)
         self.speaker_to_id = self._get_speaker_to_id()
         self.pre_tokenizer = self.build_tokenizer(cfg)
         self.bpe_tokenizer = self.build_bpe(cfg)
         self.scorers = []
-        if self.cfg.eval_wer:
+        
+        self.eval_wer = getattr(cfg, "eval_wer", False)
+        self.eval_bleu = getattr(cfg, "eval_bleu", False)
+        
+        if self.eval_wer:
             self.scorers.append(
                 scoring.build_scorer(cfg.eval_wer_config, self.tgt_dict)
             )
-        if self.cfg.eval_bleu:
+        if self.eval_bleu:
             self.scorers.append(
                 scoring.build_scorer(cfg.eval_bleu_config, self.tgt_dict)
             )
             
         # effect parameters for data augmentation
-        self.effects_info = {
-            "tempo": list(map(float, cfg.data_augmentation.tempo.split(","))),
-            "pitch": list(map(int, cfg.data_augmentation.pitch.split(","))),
-            "echo": {
-                "delay": list(map(int, cfg.data_augmentation.echo_delay.split(","))),
-                "decay": list(map(float, cfg.data_augmentation.echo_decay.split(",")))
+        self.effects_info = None
+        if getattr(cfg, "data_augmentation", None) is not None and cfg.data_augmentation.p_augm > 0:
+            self.effects_info = {
+                "tempo": list(map(float, cfg.data_augmentation.tempo.split(","))),
+                "pitch": list(map(int, cfg.data_augmentation.pitch.split(","))),
+                "echo": {
+                    "delay": list(map(int, cfg.data_augmentation.echo_delay.split(","))),
+                    "decay": list(map(float, cfg.data_augmentation.echo_decay.split(",")))
+                }
             }
-        } if cfg.data_augmentation is not None and cfg.data_augmentation.p_augm > 0 else None
-        self.sampling_ratios = list(map(float, cfg.sampling_ratios.split(",")))
+            
+        self.sampling_ratios = None
+        if getattr(cfg, "sampling_ratios", None) is not None:
+            self.sampling_ratios = list(map(float, cfg.sampling_ratios.split(",")))
         
-        self.use_kd = cfg.knowledge_distillation is not None and cfg.knowledge_distillation != ""
+        self.use_kd = getattr(cfg, "knowledge_distillation", None) is not None and cfg.knowledge_distillation != ""
 
     def _get_speaker_to_id(self):
         speaker_to_id = None
@@ -196,20 +208,6 @@ class SpeechToTextTask(FairseqTask):
         if getattr(cfg, "train_subset", None) is not None:
             if not all(s.startswith("train") for s in cfg.train_subset.split(",")):
                 raise ValueError('Train splits should be named like "train*".')
-
-        if cfg.eval_wer:
-            if cfg.eval_wer_config.wer_tokenizer == "none":
-                logger.warning(
-                    "You are not using any tokenizer for WER scoring. Using '13a' is recommended."
-                )
-            if not cfg.eval_wer_config.wer_lowercase:
-                logger.warning(
-                    "You are not lowercasing before WER scoring."
-                )
-            if not cfg.eval_wer_config.wer_remove_punct:
-                logger.warning(
-                    "You are not removing punctuation before WER scoring."
-                )
 
         return cls(cfg, tgt_dict)
 
@@ -272,15 +270,17 @@ class SpeechToTextTask(FairseqTask):
 
     def build_model(self, cfg, from_checkpoint=False):
         model = super(SpeechToTextTask, self).build_model(cfg, from_checkpoint)
-        self.sequence_generator = self.build_generator(
-            [model],
-            self.cfg.eval_gen_config
-        )
-        # Trick: update model configuration globally
-        if not safe_hasattr(cfg.encoder, 'pre_args'):
-            cfg.encoder.pre_args = model.encoder.cfg_.pre_args
-        if not safe_hasattr(cfg.decoder, 'pre_args'):
-            cfg.decoder.pre_args = model.decoder.cfg_.pre_args
+        
+        if self.eval_bleu or self.eval_wer:
+            self.sequence_generator = self.build_generator(
+                [model],
+                self.cfg.eval_gen_config
+            )
+            # Trick: update model configuration globally
+            if not safe_hasattr(cfg.encoder, 'pre_args'):
+                cfg.encoder.pre_args = model.encoder.cfg_.pre_args
+            if not safe_hasattr(cfg.decoder, 'pre_args'):
+                cfg.decoder.pre_args = model.decoder.cfg_.pre_args
 
         return model
 
