@@ -71,7 +71,18 @@ def do_g2p(g2p, sent, res_wrds, is_first_sent):
     if sent in res_wrds:
         pho_seq = [res_wrds[sent]]
     else:
-        pho_seq = g2p(sent)
+        print(f"- {sent}")
+        try:
+            pho_seq = g2p(sent)
+        except:
+            try:
+                span = re.search("(([0-9]){3},)+", sent).span()
+                dst = " ".join([d for d in sent[span[0]: span[1]].replace(",", "")])
+                sent = sent.replace(sent[span[0]: span[1]], dst)
+                print(f"modified: {sent}")
+                pho_seq = g2p(sent)
+            except:
+                pho_seq = "FAILED_SENTENCE"
     if not is_first_sent:
         pho_seq = [" "] + pho_seq  # add space to separate
     return pho_seq
