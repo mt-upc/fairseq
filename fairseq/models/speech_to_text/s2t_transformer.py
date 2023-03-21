@@ -368,6 +368,7 @@ class S2TTransformerEncoder(FairseqEncoder):
             "encoder_states": encoder_states,  # List[T x B x C]
             "src_tokens": [],
             "src_lengths": [],
+            "input_lengths": [input_lengths],
         }
 
     def forward(self, src_tokens, src_lengths, return_all_hiddens=False):
