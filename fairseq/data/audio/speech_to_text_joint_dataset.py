@@ -60,6 +60,10 @@ class S2TJointDataConfig(S2TDataConfig):
         """Hyper-parameter alpha = 1/T for temperature-based resampling. (text
         input only) (alpha = 1 for no resampling)"""
         return self.config.get("sampling_text_alpha", 1.0)
+    
+    @property
+    def prepend_src_lang_tag(self):
+        return self.config.get("prepend_src_lang_tag", False)
 
 
 class SpeechToTextJointDatasetItem(NamedTuple):
@@ -75,6 +79,7 @@ class SpeechToTextJointDatasetItem(NamedTuple):
 # use_src_lang_id:
 #   0: don't use src_lang_id
 #   1: attach src_lang_id to the src_txt_tokens as eos
+#   2: prepend src_lang_id to the src_txt_tokens
 class SpeechToTextJointDataset(SpeechToTextDataset):
     def __init__(
         self,
@@ -193,7 +198,10 @@ class SpeechToTextJointDataset(SpeechToTextDataset):
                         1, eos_idx.view(-1, 1), src_lang_idxs.view(-1, 1)
                     )
                 else:
-                    raise NotImplementedError("Implementation is required")
+                    src_txt_tokens = torch.cat(
+                        [src_lang_idxs.view(-1, 1), src_txt_tokens], dim=1
+                    )
+                    src_txt_lengths += 1
 
             src_txt_tokens = src_txt_tokens.index_select(0, order)
             src_txt_lengths = src_txt_lengths.index_select(0, order)
