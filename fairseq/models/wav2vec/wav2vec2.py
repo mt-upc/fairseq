@@ -1044,13 +1044,18 @@ class TransformerEncoder(nn.Module):
         layer_results = []
         r = None
         for i, layer in enumerate(self.layers):
-            dropout_probability = np.random.random() if self.layerdrop > 0 else 1
+            if self.layerdrop > 0 and i != (self, "ctc_layer_id", -1) and i != len(self.layers):
+                dropout_probability = np.random.random()
+            else:
+                dropout_probability = 1
             if not self.training or (dropout_probability > self.layerdrop):
                 x, (z, lr) = layer(
                     x, self_attn_padding_mask=padding_mask, need_weights=False
                 )
                 if i >= min_layer:
                     layer_results.append((x, z, lr))
+            else:
+                layer_results.append(None)
             if i == tgt_layer:
                 r = x
                 break
@@ -1072,7 +1077,7 @@ class TransformerEncoder(nn.Module):
                     c[:-pad_length],
                 )
 
-            layer_results = [undo_pad(*u) for u in layer_results]
+            layer_results = [undo_pad(*u) if u is not None else None for u in layer_results]
 
         return x, layer_results
 
