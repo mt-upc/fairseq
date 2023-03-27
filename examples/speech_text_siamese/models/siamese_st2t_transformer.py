@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 
 import logging
-from collections import namedtuple
 from typing import Dict, List, Optional, Tuple
 
 import torch
@@ -9,7 +8,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
 
-from fairseq import checkpoint_utils, utils
+from fairseq import utils
 from fairseq.data.data_utils import lengths_to_padding_mask
 from fairseq.dataclass.utils import convert_namespace_to_omegaconf
 from fairseq.models import (
@@ -19,12 +18,11 @@ from fairseq.models import (
     register_model,
     register_model_architecture,
 )
-from fairseq.models.speech_to_text import S2TTransformerEncoder
-from fairseq.models.speech_to_text.s2t_transformer import Conv1dSubsampler
 from fairseq.models.transformer import Embedding, TransformerEncoder
-from fairseq.models.wav2vec import Wav2Vec2Model
+from fairseq.models.wav2vec import Wav2VecEncoder
 from fairseq.modules import FairseqDropout, LayerNorm
 from fairseq.modules.fairseq_dropout import FairseqDropout
+from fairseq.modules.length_adaptor import Conv1dAdaptor
 
 logger = logging.getLogger(__name__)
 
@@ -45,13 +43,15 @@ def build_embedding(dictionary, embed_dim):
 
 
 class CTCDecoder(FairseqDecoder):
-    def __init__(self, dictionary, embed_dim, task, dropout_rate=0.0, bias=True):
+    def __init__(self, dictionary, embed_dim, task, dropout_rate=0.0, bias=True, layernorm=False):
         super().__init__(dictionary)
         self.blank_idx = (
             dictionary.index(task.blank_symbol) if hasattr(task, "blank_symbol") else 0
         )
         self.pad_idx = dictionary.pad()
         self.eos_idx = dictionary.eos()
+        if layernorm:
+            self.layer_norm = LayerNorm(embed_dim)
         self.dropout_module = FairseqDropout(dropout_rate)
         self.proj = Linear(embed_dim, len(dictionary), bias=bias)
         logging.info(f"| dictionary for CTC module: {len(dictionary)} types")
@@ -60,15 +60,17 @@ class CTCDecoder(FairseqDecoder):
         self,
         encoder_out: Optional[Dict[str, List[Tensor]]],
     ):
-        if "severed_encoder_out" not in encoder_out:  # backward comptability
-            x = encoder_out["encoder_out"][0]
+        if "ctc_layer_result" in encoder_out and encoder_out["ctc_layer_result"] is not None:
+            assert hasattr(self, "layer_norm")
+            x = encoder_out["ctc_layer_result"][0].transpose(0, 1)
         else:
-            if encoder_out["severed_encoder_out"][0] is not None:
-                x = encoder_out["severed_encoder_out"][0]
-            else:
-                x = encoder_out["encoder_out"][0]
-        x = x.transpose(0, 1)  # B x T x D
+            x = encoder_out["encoder_out"][0]
+            
+        if hasattr(self, "layer_norm"):
+            x = self.layer_norm(x)
+            
         x = self.proj(self.dropout_module(x))
+        
         return x.transpose(0, 1), {"attn": [], "inner_states": None}
 
 
@@ -76,88 +78,8 @@ class DummyDecoder(FairseqDecoder):
     def __init__(self, dictionary):
         super().__init__(dictionary)
 
-
-class SpeechEncoderWithAdapter(FairseqEncoder):
-    def __init__(self, args):
-        super().__init__(None)
-        self.spch_encoder = S2TTransformerEncoder(args)
-        self.cnn_module = None
-        if not getattr(args, "no_cnn_in_adapter", False):
-            self.cnn_module = Conv1dSubsampler(
-                args.encoder_embed_dim,
-                args.conv_channels,
-                args.encoder_embed_dim,
-                [3],
-            )
-        self.fc = nn.Sequential(
-            nn.Linear(args.encoder_embed_dim, args.encoder_embed_dim * 2),
-            nn.ReLU(),
-            nn.Linear(args.encoder_embed_dim * 2, args.encoder_embed_dim),
-            LayerNorm(args.encoder_embed_dim),
-        )
-
-    def forward(self, src_tokens, src_lengths, return_all_hiddens=False):
-        speech_out = self.spch_encoder(
-            src_tokens, src_lengths, return_all_hiddens=return_all_hiddens
-        )
-        # logging.info(f"speech_out: {speech_out['encoder_out'][0].size()}") # T x B x D
-        # logging.info(f"input_lengths: {speech_out['input_lengths'][0].size()}") # B
-        x = speech_out["encoder_out"][0]
-        if speech_out["encoder_padding_mask"]:
-            encoder_padding_mask = speech_out["encoder_padding_mask"][0]
-        else:
-            encoder_padding_mask = torch.zeros(1)
-        input_lens = speech_out["input_lengths"][0]
-        if self.cnn_module is not None:
-            x, input_lens = self.cnn_module(
-                speech_out["encoder_out"][0].transpose(0, 1),
-                speech_out["input_lengths"][0],
-            )
-            encoder_padding_mask = lengths_to_padding_mask(input_lens)
-        # logging.info(f"x: {x.size()}, input_lens: {input_lens.size()}, encoder_padding_mask: {encoder_padding_mask.size()}")
-        x = self.fc(x)
-        # logging.info(f"x: {x.size()}")
-
-        return {
-            "encoder_out": [x],  # T x B x C
-            "encoder_padding_mask": [encoder_padding_mask]
-            if encoder_padding_mask.any()
-            else [],  # B x T
-            "encoder_embedding": [],  # B x T x C
-            "encoder_states": [],  # List[T x B x C]
-            "src_tokens": [],
-            "src_lengths": [],
-            "input_lengths": [input_lens],
-        }
-
-
-class Wav2VecEncoderWithTransformer(FairseqEncoder):
-    def __init__(self, args):
-        super().__init__(None)
-        self.freeze_w2v_encoder = args.freeze_w2v_encoder
-        ckpt = torch.load(args.w2v_path)
-        w2v_args = ckpt["args"]
-        w2v_model_config = convert_namespace_to_omegaconf(w2v_args).model
-        self.w2v_encoder = Wav2Vec2Model(w2v_model_config)
-        self.w2v_encoder.load_state_dict(ckpt["model"])
-        args = args._replace(input_feat_per_channel=w2v_args.encoder_embed_dim)
-        self.transformer_encoder = S2TTransformerEncoder(args)
-
-    def _get_w2v_feature(self, src_tokens, src_lengths):
-        padding_mask = lengths_to_padding_mask(src_lengths)
-        res = self.w2v_encoder.extract_features(src_tokens, padding_mask)
-        padding_mask = res["padding_mask"]
-        if padding_mask is not None:
-            output_lengths = (1 - padding_mask.int()).sum(dim=1)
-        else:
-            B, T, _ = res["x"].size()
-            output_lengths = (torch.ones(B, device=res["x"].device) * T).long()
-        return res["x"], output_lengths
-
-    def forward(self, src_tokens, src_lengths):
-        x, input_lengths = self._get_w2v_feature(src_tokens, src_lengths)
-        x = self.transformer_encoder(x, input_lengths)
-        return x
+class Wav2VecMbartEncoder(FairseqEncoder):
+    pass
 
 
 class SiameseSpeechTextEncoders(FairseqEncoder):
@@ -167,78 +89,106 @@ class SiameseSpeechTextEncoders(FairseqEncoder):
         spch_encoder,
         dictionary,
         text_encoder,
+        adaptor=None
     ):
         super().__init__(dictionary)
 
         self.spch_encoder = spch_encoder
         self.text_encoder = text_encoder
+        if adaptor is not None:
+            self.adaptor = adaptor
         self.shrink_speech_output = getattr(args, "shrink_speech_output", False)
         self.zero_speech_output = getattr(args, "zero_speech_output", False)
+        self.freeze_text_encoder = getattr(args, "freeze_text_encoder", False)
+        self.retain_dropout_in_frozen_text_encoder = \
+            getattr(args, "retain_dropout_in_frozen_text_encoder", False)
+        self.ctc_layer_id = getattr(args, "w2v_ctc_layer_id", -1)
 
     @classmethod
     def build_speech_encoder(cls, args):
-        cfg = {
-            "input_feat_per_channel": args.input_feat_per_channel,
-            "input_channels": getattr("args", "input_channels", 1),
-            "conv_kernel_sizes": args.conv_kernel_sizes,
-            "conv_channels": args.conv_channels,
-            "encoder_embed_dim": args.encoder_embed_dim,
-            "encoder_ffn_embed_dim": args.encoder_ffn_embed_dim,
-            "encoder_layers": args.speech_encoder_layers,
-            "encoder_layerdrop": args.encoder_layerdrop,
-            "encoder_attention_heads": args.encoder_attention_heads,
-            "max_source_positions": args.max_source_positions,
-            "dropout": args.dropout,
-            "encoder_normalize_before": args.encoder_normalize_before,
-            "activation_dropout": args.activation_dropout,
-            "attention_dropout": args.attention_dropout,
-            "activation_fn": args.activation_fn,
-            "layernorm_embedding": args.layernorm_embedding,
-            "no_token_positional_embeddings": args.no_token_positional_embeddings,
-            "no_scale_embedding": args.no_scale_embedding,
-            "quant_noise_pq": args.quant_noise_pq,
-            "encoder_freezing_updates": 0,
-            "no_cnn_in_adapter": getattr(args, "no_cnn_in_adapter", False),
-            "freeze_w2v_encoder": getattr(args, "freeze_w2v_encoder", False),
-            "w2v_path": getattr(args, "w2v_path", ""),
-            "severed_layer": getattr(args, "severed_layer", None),
-        }
-        model_args = namedtuple("args", cfg.keys())(*cfg.values())
-        if getattr(args, "use_w2v_encoder", False):
-            spch_encoder = Wav2VecEncoderWithTransformer(model_args)
-        elif not getattr(args, "speech_encoder_with_adapter", False):
-            spch_encoder = S2TTransformerEncoder(model_args)
-        else:
-            spch_encoder = SpeechEncoderWithAdapter(model_args)
+    
+        ckpt = torch.load(args.w2v_path)
+        
+        w2v_args = ckpt["args"]
+        w2v_model_config = convert_namespace_to_omegaconf(w2v_args).model      
+        
+        w2v_model_config.final_dropout = args.w2v_final_dropout
+        w2v_model_config.w2v_args.model.dropout = args.w2v_dropout
+        w2v_model_config.w2v_args.model.attention_dropout = args.w2v_attention_dropout
+        w2v_model_config.w2v_args.model.activation_dropout = args.w2v_activation_dropout
+        w2v_model_config.w2v_args.model.dropout_input = args.w2v_dropout_input
+        w2v_model_config.apply_mask = args.w2v_apply_mask
+        w2v_model_config.w2v_args.model.mask_length = args.w2v_mask_length
+        w2v_model_config.w2v_args.model.mask_channel_length = args.w2v_mask_channel_length
+        w2v_model_config.w2v_args.model.mask_prob = args.w2v_mask_prob
+        w2v_model_config.w2v_args.model.mask_channel_prob = args.w2v_mask_channel_prob
+        
+        spch_encoder = Wav2VecEncoder(
+            w2v_model_config,
+            output_size=ckpt["model"]["w2v_encoder.proj.weight"].size(0)
+        )
+
+        model_ckpt = {}
+        for k, v in ckpt["model"].items():
+            if k.startswith("w2v_encoder."):
+                model_ckpt[k.replace("w2v_encoder.", "")] = v
+        
+        logger.info(f"Loading wav2vec2.0 encoder from {args.w2v_path} ...")
+        missing_keys, unexpected_keys = spch_encoder.load_state_dict(model_ckpt, strict=False)
+        if missing_keys: logger.info(f"Missing keys in state dict (some may correspond to resetted parameters):\n\t" + '\n\t'.join(missing_keys))
+        if unexpected_keys: logger.info(f"Unexpected keys in state dict:\n\t" + '\n\t'.join(unexpected_keys))
+        
+        spch_encoder.freeze_finetune_updates = 0
+        spch_encoder.w2v_model.encoder.layerdrop = args.w2v_layerdrop
+        spch_encoder.embed_dim = spch_encoder.w2v_model.cfg.encoder_embed_dim
+        spch_encoder.w2v_model.encoder.ctc_layer_id = args.w2v_ctc_layer_id
+
         return spch_encoder
 
     @classmethod
-    def build_text_encoder(cls, args, src_dictionary):
-        cfg = {
-            "encoder_embed_dim": args.encoder_text_embed_dim,
-            "encoder_ffn_embed_dim": args.encoder_ffn_embed_dim,
-            "encoder_layers": args.text_encoder_layers,
-            "encoder_layerdrop": args.encoder_layerdrop,
-            "encoder_attention_heads": args.encoder_attention_heads,
-            "max_source_positions": args.max_positions_text,
-            "dropout": args.dropout,
-            "encoder_normalize_before": args.encoder_normalize_before,
-            "activation_dropout": args.activation_dropout,
-            "attention_dropout": args.attention_dropout,
-            "activation_fn": args.activation_fn,
-            "adaptive_input": args.adaptive_input,
-            "no_token_positional_embeddings": args.no_token_positional_embeddings,
-            "no_scale_embedding": args.no_scale_embedding,
-            "quant_noise_pq": args.quant_noise_pq,
-            "layernorm_embedding": args.encoder_text_layernorm_embedding,
-        }
-        text_encoder = None
-
-        model_args = namedtuple("args", cfg.keys())(*cfg.values())
-        enc_emb = build_embedding(src_dictionary, model_args.encoder_embed_dim)
-        text_encoder = TransformerEncoder(model_args, src_dictionary, enc_emb)
+    def build_text_encoder(cls, args, src_dictionary):       
+        ckpt = torch.load(args.mbart_path)
+        
+        enc_emb = build_embedding(src_dictionary, ckpt["args"].encoder_embed_dim)
+        
+        text_encoder = TransformerEncoder(
+            ckpt["args"], src_dictionary, enc_emb
+        )
+        
+        model_ckpt = {}
+        for k, v in ckpt["model"].items():
+            if k.startswith("encoder."):
+                model_ckpt[k.replace("encoder.", "")] = v
+        
+        logger.info(f"Loading mBART encoder from {args.mbart_path} ...")
+        missing_keys, unexpected_keys = text_encoder.load_state_dict(model_ckpt, strict=False)
+        if missing_keys: logger.info(f"Missing keys in state dict (some may correspond to resetted parameters):\n\t" + '\n\t'.join(missing_keys))
+        if unexpected_keys: logger.info(f"Unexpected keys in state dict:\n\t" + '\n\t'.join(unexpected_keys))
+        
+        if getattr(args, "freeze_text_encoder", False):
+            logging.info(f"Freezing text encoder ...")
+            for n, p in text_encoder.named_parameters():
+                logging.info(f"- freezing {n}")
+                p.requires_grad = False
+                
+            if not getattr(args, "retain_dropout_in_frozen_text_encoder", False):
+                text_encoder.eval()
 
         return text_encoder
+    
+    @classmethod
+    def build_adaptor(cls, args, spch_encoder):
+        if getattr(args, "conv1d_adaptor_layers", 0) > 0:
+            adaptor = Conv1dAdaptor(
+                in_dim=spch_encoder.embed_dim,
+                out_dim=spch_encoder.embed_dim,
+                n_layers=args.conv1d_adaptor_layers,
+                kernel_size=args.conv1d_adaptor_kernel_size,
+                stride=args.conv1d_adaptor_stride
+            )
+        else:
+            adaptor = None
+        return adaptor
 
     def forward(
         self,
@@ -255,31 +205,67 @@ class SiameseSpeechTextEncoders(FairseqEncoder):
             src_txt_tokens: padded tensor (B, T)
             src_txt_lengths: tensor of original lengths of input utterances (text) (B,)
         """
-        # src_tokens only: inference
-        # src_tokens, src_lengths: speech only training
-        # src_tokens, src_txt_tokens, src_txt_lengths: siamese training
-
-        # if src_tokens is None and src_txt_tokens is None and masked_src_txt_tokens is None:
-        #     raise ValueError(
-        #         "src_tokens and src_txt_tokens and masked_src_txt_tokens cannot be None at the same time"
-        #     )
-        # if src_tokens is not None and self.spch_encoder is not None:
-        speech_out = self.spch_encoder(src_tokens, src_lengths)
-        # if src_txt_tokens is not None and self.text_encoder is not None:
-        text_out = self.text_encoder(src_txt_tokens, src_txt_lengths)
+        speech_out = self.forward_speech(src_tokens, src_lengths)
+        if hasattr(self, "adaptor"):
+            speech_out = self.forward_adaptor(speech_out)
+        text_out = self.forward_text(src_txt_tokens, src_txt_lengths)
 
         return speech_out, text_out
+    
+    def forward_adaptor(self, speech_out):
 
-    def reorder_encoder_out(self, encoder_out, new_order):
-        assert self.training is False  # used for inference only
-        if self.spch_encoder is not None:
-            if hasattr(self.spch_encoder, "w2v_encoder"):
-                return self.spch_encoder.transformer_encoder.reorder_encoder_out(
-                    encoder_out, new_order
-                )
-            return self.spch_encoder.reorder_encoder_out(encoder_out, new_order)
+        x, padding_mask = self.adaptor(
+            speech_out["encoder_out"][0].transpose(0, 1),
+            speech_out["encoder_padding_mask"][0] if speech_out["encoder_padding_mask"][0] is not None else None,
+            )
+        x = x.transpose(0, 1)
+        
+        if padding_mask is not None:
+            output_lengths = (1 - padding_mask.int()).sum(dim=1)
         else:
-            return self.text_encoder.reorder_encoder_out(encoder_out, new_order)
+            B, T, _ = x.size()
+            output_lengths = (torch.ones(B, device=x.device) * T).long()
+        
+        speech_out["adaptor_out"] = [x]
+        speech_out["adaptor_padding_mask"] = [padding_mask]
+        speech_out["adaptor_out_lengths"] = [output_lengths]
+        
+        return speech_out
+    
+    def forward_speech(self, src_tokens, src_lengths):
+        padding_mask = lengths_to_padding_mask(src_lengths)
+        
+        w2v_args = {
+            "source": src_tokens,
+            "padding_mask": padding_mask,
+            "mask": self.spch_encoder.apply_mask and self.spch_encoder.training,
+        }
+        
+        res = self.spch_encoder.w2v_model.extract_features(**w2v_args)
+        
+        padding_mask = res["padding_mask"]
+        if padding_mask is not None:
+            output_lengths = (1 - padding_mask.int()).sum(dim=1)
+        else:
+            B, T, _ = res["x"].size()
+            output_lengths = (torch.ones(B, device=res["x"].device) * T).long()
+            
+        return {
+            "encoder_out": [res["x"]],  # T x B x C
+            "encoder_padding_mask": [padding_mask], # B x T
+            "encoder_embedding": [],  # B x T x C
+            "encoder_states": [],  # List[T x B x C]
+            "src_tokens": [],
+            "src_lengths": [],
+            "encoder_out_lengths": [output_lengths],
+            "ctc_layer_result": res["layer_results"][self.ctc_layer_id] if self.ctc_layer_id != -1 else None,
+        }
+    
+    def forward_text(self, src_txt_tokens, src_txt_lengths):
+        if self.freeze_text_encoder and not self.retain_dropout_in_frozen_text_encoder:
+            with torch.no_grad():
+                return self.text_encoder(src_txt_tokens, src_txt_lengths)
+        return self.text_encoder(src_txt_tokens, src_txt_lengths)
 
 
 @register_model("siamese_st2t_transformer")
@@ -290,127 +276,23 @@ class SiameseST2TTransformerModel(FairseqEncoderDecoderModel):
 
     @staticmethod
     def add_args(parser):
-        """Add model-specific arguments to the parser."""
-        # encoder 1: S2TTransformerEncoder for speech
+        # parser.add_argument(
+        #     "--dropout", type=float, metavar="D", help="dropout probability"
+        # )
+        # parser.add_argument(
+        #     "--activation-dropout", type=float, metavar="D", help="attention dropout probability"
+        # )
+        # parser.add_argument(
+        #     "--attention-dropout", type=float, metavar="D", help="activation dropout probability"
+        # )
         parser.add_argument(
-            "--conv-kernel-sizes",
-            type=str,
-            metavar="N",
-            help="kernel sizes of Conv1d subsampling layers",
+            "--conv1d-adaptor-layers", type=int, default=0, help="number of layers in conv1d adaptor"
         )
         parser.add_argument(
-            "--conv-channels",
-            type=int,
-            metavar="N",
-            help="# of channels in Conv1d subsampling layers",
-        )
-        # standard Transformer
-        parser.add_argument(
-            "--activation-fn",
-            type=str,
-            default="relu",
-            choices=utils.get_available_activation_fns(),
-            help="activation function to use",
+            "--conv1d-adaptor-kernel-size", type=int, default=3, help="kernel size in conv1d adaptor"
         )
         parser.add_argument(
-            "--dropout", type=float, metavar="D", help="dropout probability"
-        )
-        parser.add_argument(
-            "--attention-dropout",
-            type=float,
-            metavar="D",
-            help="dropout probability for attention weights",
-        )
-        parser.add_argument(
-            "--activation-dropout",
-            "--relu-dropout",
-            type=float,
-            metavar="D",
-            help="dropout probability after activation in FFN.",
-        )
-        parser.add_argument(
-            "--encoder-embed-dim",
-            type=int,
-            metavar="N",
-            help="encoder embedding dimension",
-        )
-        parser.add_argument(
-            "--encoder-text-embed-dim",
-            type=int,
-            metavar="N",
-            help="encoder text embedding dimension",
-        )
-        parser.add_argument(
-            "--encoder-ffn-embed-dim",
-            type=int,
-            metavar="N",
-            help="encoder embedding dimension for FFN",
-        )
-        parser.add_argument(
-            "--encoder-attention-heads",
-            type=int,
-            metavar="N",
-            help="num encoder attention heads",
-        )
-        parser.add_argument(
-            "--decoder-embed-dim",
-            type=int,
-            metavar="N",
-            help="decoder embedding dimension",
-        )
-        parser.add_argument(
-            "--layernorm-embedding",
-            action="store_true",
-            help="add layernorm to embedding",
-        )
-        parser.add_argument(
-            "--no-scale-embedding",
-            action="store_true",
-            help="if True, dont scale embeddings",
-        )
-        # non-standard transformer parameters
-        parser.add_argument(
-            "--speech-encoder-layers",
-            type=int,
-            metavar="N",
-            help="num speech encoder layers",
-        )
-        parser.add_argument(
-            "--text-encoder-layers",
-            type=int,
-            metavar="N",
-            help="num text encoder layers",
-        )
-        parser.add_argument(
-            "--load-pretrain-speech-encoder",
-            type=str,
-            default="",
-            metavar="EXPR",
-            help="path to the pretrained speech encoder",
-        )
-        parser.add_argument(
-            "--load-pretrain-text-encoder",
-            type=str,
-            default="",
-            metavar="EXPR",
-            help="path to the pretrained text encoder",
-        )
-        parser.add_argument(
-            "--freeze-text-encoder-embed",
-            action="store_true",
-            help="Freeze embedding layer of text encoder",
-        )
-        parser.add_argument(
-            "--num-text-encoder-layers-frozen",
-            type=int,
-            default=0,
-            help="Number of layers to be frozen in text encoder",
-        )
-        # additional parameters for Siamese encoders
-        parser.add_argument(
-            "--use-ctc-module",
-            action="store_true",
-            help="Use CTC module (Linear + Softmax) after the encoder",
+            "--conv1d-adaptor-stride", type=int, default=2, help="stride in conv1d adaptor"
         )
         parser.add_argument(
             "--shrink-speech-output",
@@ -421,16 +303,6 @@ class SiameseST2TTransformerModel(FairseqEncoderDecoderModel):
             "--zero-speech-output",
             action="store_true",
             help="Zero out speech encoder's output based on CTC module",
-        )
-        parser.add_argument(
-            "--share-text-encoder-ctc-decoder-input-output",
-            action="store_true",
-            help="share text encoder embed and ctc output layer",
-        )
-        parser.add_argument(
-            "--encoder-text-layernorm-embedding",
-            action="store_true",
-            help="add layernorm to text encoder embedding",
         )
         parser.add_argument(
             "--freeze-text-encoder", action="store_true", help="Freeze text encoder"
@@ -457,105 +329,82 @@ class SiameseST2TTransformerModel(FairseqEncoderDecoderModel):
             type=int,
             default=None,
             help="speech encoder layer to insert CTC module",
-        ) # TODO: add this for wav2vec
+        ) 
+        parser.add_argument(
+            "--use-mbart-text-encoder", action="store_true", help="use mbart text encoder"
+        )
+        parser.add_argument(
+            "--mbart-path", type=str, default="", help="path to pre-trained mbart model"
+        )
+        parser.add_argument(
+            "--retain-dropout-in-frozen-text-encoder", action="store_true", help="retain dropout in frozen mbart text encoder"
+        )
+        parser.add_argument(
+            "--w2v-final-dropout", type=float, metavar="D", help="wav2vec speech encoder final dropout"
+        )
+        parser.add_argument(
+            "--w2v-dropout", type=float, metavar="D", help="wav2vec speech encoder dropout"
+        )
+        parser.add_argument(
+            "--w2v-attention-dropout", type=float, metavar="D", help="wav2vec speech encoder attention dropout"
+        )
+        parser.add_argument(
+            "--w2v-activation-dropout", type=float, metavar="D", help="wav2vec speech encoder activation dropout"
+        )
+        parser.add_argument(
+            "--w2v-dropout-input", type=float, metavar="D", help="wav2vec speech encoder dropout input"
+        )
+        parser.add_argument(
+            "--w2v-layerdrop", type=float, metavar="D", help="wav2vec speech encoder layerdrop"
+        )
+        parser.add_argument(
+            "--w2v-apply-mask", action="store_true", help="apply mask to wav2vec speech encoder"
+        )
+        parser.add_argument(
+            "--w2v-mask-length", type=int, metavar="D", help="wav2vec speech encoder mask length"
+        )
+        parser.add_argument(
+            "--w2v-mask-channel-length", type=int, metavar="D", help="wav2vec speech encoder mask channel length"
+        )
+        parser.add_argument(
+            "--w2v-mask-prob", type=float, metavar="D", help="wav2vec speech encoder mask prob"
+        )
+        parser.add_argument(
+            "--w2v-mask-channel-prob", type=float, metavar="D", help="wav2vec speech encoder mask channel prob"
+        )
+        parser.add_argument(
+            "--w2v-ctc-layer-id", type=int, default=-1, help="in which layer to insert CTC module"
+        )
 
     @classmethod
     def build_encoder(cls, args, task):
         spch_encoder = SiameseSpeechTextEncoders.build_speech_encoder(args)
         text_encoder = SiameseSpeechTextEncoders.build_text_encoder(args, task.src_dict)
+        adaptor = SiameseSpeechTextEncoders.build_adaptor(args, spch_encoder)
         encoder = SiameseSpeechTextEncoders(
             args,
             spch_encoder,
             task.src_dict,
             text_encoder=text_encoder,
+            adaptor=adaptor
         )
-        if getattr(args, "load_pretrain_speech_encoder", "") != "":
-            logging.info(f"Loading pretrained speech encoder ...")
-            state = checkpoint_utils.load_checkpoint_to_cpu(
-                args.load_pretrain_speech_encoder
-            )
-            ckpt_component_type = (
-                ["encoder.spch_encoder"]
-                if any(
-                    [
-                        key.startswith("encoder.spch_encoder")
-                        for key in state["model"].keys()
-                    ]
-                )
-                else ["encoder"]
-            )
-            checkpoint_utils.load_pretrained_component_from_model_different_keys(
-                spch_encoder, state, ckpt_component_types=ckpt_component_type
-            )
-            logging.info(
-                f"Loaded pretrained speech encoder from {args.load_pretrain_speech_encoder}"
-            )
-
-        if getattr(args, "load_pretrain_text_encoder", "") != "":
-            logging.info(f"Loading pretrained text encoder ...")
-            state = checkpoint_utils.load_checkpoint_to_cpu(
-                args.load_pretrain_text_encoder
-            )
-            ckpt_component_type = (
-                ["decoder.sentence_encoder"]
-                if any(
-                    [
-                        key.startswith("decoder.sentence_encoder")
-                        for key in state["model"].keys()
-                    ]
-                )
-                else ["encoder"]
-            )
-            checkpoint_utils.load_pretrained_component_from_model_different_keys_v2(
-                text_encoder,
-                state,
-                ckpt_component_types=ckpt_component_type,
-                # exclude_layers=["embed_tokens", "embed_positions", "emb_layer_norm"]
-            )
-            logging.info(
-                f"Loaded pretrained text encoder from {args.load_pretrain_text_encoder}"
-            )
-
-        if getattr(args, "use_w2v_encoder", False) and getattr(
-            args, "freeze_w2v_encoder", False
-        ):
-            logging.info(f"Freezeing wav2vec encoder ...")
-            for n, p in spch_encoder.w2v_encoder.named_parameters():
-                logging.info(f"- freezing {n}")
-                p.requires_grad = False
-
-        if getattr(args, "freeze_text_encoder", False):
-            logging.info(f"Freezing text encoder ...")
-            for n, p in text_encoder.named_parameters():
-                logging.info(f"- freezing {n}")
-                p.requires_grad = False
-
-        if getattr(args, "freeze_text_encoder_embed", False):
-            logging.info(f"Freezing text encoder embedding layer...")
-            text_encoder.embed_tokens.requires_grad = False
-            text_encoder.embed_positions.requires_grad = False
-
-        if getattr(args, "num_text_encoder_layers_frozen", 0) > 0:
-            logging.info(f"Freezing text encoder transformer layer...")
-            for l in range(-args.num_text_encoder_layers_frozen, 0, 1):
-                logging.info(f"- freezing layer {l + args.text_encoder_layers}...")
-                text_encoder.layers[l].requires_grad = False
-
+        
         return encoder
 
     @classmethod
     def build_decoder(cls, args, task, encoder):
-        if args.use_ctc_module:
+        if args.ctc_weight > 0:
             decoder = CTCDecoder(
                 task.source_dictionary,
-                args.decoder_embed_dim,
+                encoder.spch_encoder.embed_dim,
                 task,
-                args.dropout,
-                bias=not getattr(args, "no_bias_in_proj", False),
+                encoder.spch_encoder.final_dropout.p,
+                layernorm=getattr(args, "w2v_ctc_layer_id", -1) != -1,
             )
-            if getattr(args, "share_text_encoder_ctc_decoder_input_output", False):
-                assert encoder.text_encoder is not None
-                encoder.text_encoder.embed_tokens.weight = decoder.proj.weight
+            
+            # initialized the decoder's projection layer with the encoder's ctc projection layer
+            decoder.proj = encoder.spch_encoder.proj
+            
         else:
             decoder = DummyDecoder(task.source_dictionary)
 
@@ -569,6 +418,10 @@ class SiameseST2TTransformerModel(FairseqEncoderDecoderModel):
 
         encoder = cls.build_encoder(args, task)
         decoder = cls.build_decoder(args, task, encoder)
+        
+        # do it after initializing the decoder to transfer the ctc weights
+        encoder.spch_encoder.w2v_model.remove_pretraining_modules()
+        
         return cls(encoder, decoder)
 
     def get_normalized_probs(self, net_output, log_probs, sample=None, idx=0):
@@ -757,79 +610,9 @@ class SiameseST2TTransformerModel(FairseqEncoderDecoderModel):
 
 
 @register_model_architecture(
-    "siamese_st2t_transformer", "siamese_st2t_transformer_base"
+    "siamese_st2t_transformer", "siamese_st2t_transformer_w2v_mbart"
 )
 def siamese_st2t_transformer_base(args):
-    args.encoder_freezing_updates = getattr(args, "encoder_freezing_updates", 0)
-    # Convolutional subsampler
-    args.input_feat_per_channel = getattr(args, "input_feat_per_channel", 80)
-    args.conv_kernel_sizes = getattr(args, "conv_kernel_sizes", "5,5")
-    args.conv_channels = getattr(args, "conv_channels", 1024)
-    # Transformer
-    args.encoder_embed_dim = getattr(args, "encoder_embed_dim", 512)
-    args.encoder_text_embed_dim = getattr(
-        args, "encoder_text_embed_dim", args.encoder_embed_dim
-    )
-    args.encoder_ffn_embed_dim = getattr(args, "encoder_ffn_embed_dim", 2048)
-    args.encoder_attention_heads = getattr(args, "encoder_attention_heads", 8)
-    args.encoder_normalize_before = getattr(args, "encoder_normalize_before", True)
-    args.encoder_layerdrop = getattr(args, "encoder_layerdrop", 0)
-    args.encoder_learned_pos = getattr(args, "encoder_learned_pos", False)
-    args.encoder_text_layernorm_embedding = getattr(
-        args, "encoder_text_layernorm_embedding", False
-    )
-
-    args.decoder_embed_dim = getattr(args, "decoder_embed_dim", args.encoder_embed_dim)
-    args.dropout = getattr(args, "dropout", 0.1)
-    args.attention_dropout = getattr(args, "attention_dropout", args.dropout)
-    args.activation_dropout = getattr(args, "activation_dropout", args.dropout)
-    args.activation_fn = getattr(args, "activation_fn", "relu")
-    args.adaptive_softmax_cutoff = getattr(args, "adaptive_softmax_cutoff", None)
-    args.adaptive_softmax_dropout = getattr(args, "adaptive_softmax_dropout", 0)
-    args.tie_adaptive_weights = getattr(args, "tie_adaptive_weights", False)
-    args.no_token_positional_embeddings = getattr(
-        args, "no_token_positional_embeddings", False
-    )
-    args.adaptive_input = getattr(args, "adaptive_input", False)
-    args.layernorm_embedding = getattr(args, "layernorm_embedding", False)
-    args.no_scale_embedding = getattr(args, "no_scale_embedding", False)
-    args.quant_noise_pq = getattr(args, "quant_noise_pq", 0)
-    args.speech_encoder_layers = getattr(args, "speech_encoder_layers", 12)
-    args.text_encoder_layers = getattr(args, "text_encoder_layers", 6)
-
-    args.use_ctc_module = getattr(args, "use_ctc_module", True)
-
-
-@register_model_architecture(
-    "siamese_st2t_transformer", "siamese_st2t_transformer_s"
-)
-def siamese_st2t_transformer_s(args):
-    args.encoder_embed_dim = getattr(args, "encoder_embed_dim", 256)
-    args.encoder_text_embed_dim = getattr(args, "encoder_text_embed_dim", 256)
-    args.encoder_ffn_embed_dim = getattr(args, "encoder_ffn_embed_dim", 256 * 8)
-    args.encoder_attention_heads = getattr(args, "encoder_attention_heads", 4)
-    args.dropout = getattr(args, "dropout", 0.1)
-    siamese_st2t_transformer_base(args)
-
-
-@register_model_architecture(
-    "siamese_st2t_transformer", "siamese_st2t_transformer_m"
-)
-def siamese_st2t_transformer_m(args):
-    args.encoder_embed_dim = getattr(args, "encoder_embed_dim", 512)
-    args.encoder_ffn_embed_dim = getattr(args, "encoder_ffn_embed_dim", 512 * 4)
-    args.encoder_attention_heads = getattr(args, "encoder_attention_heads", 8)
-    args.dropout = getattr(args, "dropout", 0.15)
-    siamese_st2t_transformer_base(args)
-
-
-@register_model_architecture(
-    "siamese_st2t_transformer", "siamese_st2t_transformer_l"
-)
-def siamese_st2t_transformer_l(args):
-    args.speech_encoder_layers = getattr(args, "speech_encoder_layers", 12)
-    args.encoder_embed_dim = getattr(args, "encoder_embed_dim", 1024)
-    args.encoder_ffn_embed_dim = getattr(args, "encoder_ffn_embed_dim", 1024 * 4)
-    args.encoder_attention_heads = getattr(args, "encoder_attention_heads", 16)
-    args.dropout = getattr(args, "dropout", 0.25)
-    siamese_st2t_transformer_base(args)
+    args.use_w2v_encoder = getattr(args, "use_w2v_encoder", True)
+    args.use_mbart_text_encoder = getattr(args, "use_mbart_text_encoder", True)
+    args.freeze_text_encoder = getattr(args, "freeze_text_encoder", True)
