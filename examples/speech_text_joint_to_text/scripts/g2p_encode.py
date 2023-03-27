@@ -71,7 +71,6 @@ def do_g2p(g2p, sent, res_wrds, is_first_sent):
     if sent in res_wrds:
         pho_seq = [res_wrds[sent]]
     else:
-        print(f"- {sent}")
         try:
             pho_seq = g2p(sent)
         except:
