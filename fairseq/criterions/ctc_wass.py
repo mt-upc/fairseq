@@ -60,10 +60,10 @@ class CtcWassersteinCriterionConfig(CtcCriterionConfig):
         default=1.0,
         metadata={"help": "Weight for OT positional embeddings"},
     )
-    detach_text_enc: bool = field(
+    detach_text_encoder: bool = field(
         default=False,
-        metadata={"help": "Normalize before computing OT"},
-    )
+        metadata={"help": "Detach text encoder from the graph"},
+    ) # TODO: currently there is also freeze-text-enc. unify them
 
 
 @register_criterion(
@@ -76,7 +76,7 @@ class CtcWassersteinCriterion(CtcCriterion):
         self.ctc_weight = cfg.ctc_weight
         self.ot_weight = cfg.ot_weight
 
-        self.detach_text_enc = cfg.detach_text_enc  # TODO: add this/ probably in the model forward as well
+        self.detach_text_encoder = cfg.detach_text_encoder
         self.norm_before_ot = cfg.norm_before_ot
         self.ot_loss = cfg.ot_loss
         self.ot_p = cfg.ot_p
@@ -114,7 +114,7 @@ class CtcWassersteinCriterion(CtcCriterion):
 
         if self.ctc_weight > 0.0:
             ctc_loss, extra = self.compute_ctc_loss(
-                model, net_output, encoder_out, net_input, extra
+                model, net_output, encoder_out, sample["target"], extra
             )
             loss += self.ctc_weight * ctc_loss
 
@@ -144,14 +144,13 @@ class CtcWassersteinCriterion(CtcCriterion):
             logging_output = self.compute_wer(
                 extra["lprobs_ctc"],
                 sample,
-                net_input,
                 extra["input_lengths"],
                 logging_output,
             )
 
         return loss, sample_size, logging_output
 
-    def compute_ctc_loss(self, model, net_output, encoder_out, net_input, extra):
+    def compute_ctc_loss(self, model, net_output, encoder_out, targets, extra):
         lprobs = model.get_normalized_probs(
             net_output,
             log_probs=True,
@@ -161,17 +160,15 @@ class CtcWassersteinCriterion(CtcCriterion):
         spch_encoder_out = (
             encoder_out[0] if isinstance(encoder_out, tuple) else encoder_out
         )
-        if spch_encoder_out["encoder_padding_mask"]:
+        if spch_encoder_out["encoder_padding_mask"][0] is not None:
             non_padding_mask = ~spch_encoder_out["encoder_padding_mask"][0]
             input_lengths = non_padding_mask.long().sum(-1)
         else:
             input_lengths = lprobs.new_full(
                 (lprobs.size(1),), lprobs.size(0), dtype=torch.long
             )
-        pad_mask = (net_input["src_txt_tokens"] != self.pad_idx) & (
-            net_input["src_txt_tokens"] != self.eos_idx
-        )
-        targets_flat = net_input["src_txt_tokens"].masked_select(pad_mask)
+        pad_mask = (targets != self.pad_idx) & (targets != self.eos_idx)
+        targets_flat = targets.masked_select(pad_mask)
         target_lengths = pad_mask.sum(-1)
 
         with torch.backends.cudnn.flags(enabled=False):
@@ -190,8 +187,8 @@ class CtcWassersteinCriterion(CtcCriterion):
         extra["input_lengths"] = input_lengths
 
         return ctc_loss, extra
-
-    def compute_wer(self, lprobs, sample, net_input, input_lengths, logging_output):
+    
+    def compute_wer(self, lprobs, sample, input_lengths, logging_output):
 
         with torch.no_grad():
             lprobs_t = lprobs.transpose(0, 1).float().contiguous().cpu()
@@ -200,12 +197,7 @@ class CtcWassersteinCriterion(CtcCriterion):
             w_errs = 0
             w_len = 0
             wv_errs = 0
-            for lp, t, inp_l in zip(
-                lprobs_t,
-                sample["target_label"]
-                if "target_label" in sample
-                else net_input["src_txt_tokens"],
-                input_lengths,
+            for lp, t, inp_l in zip(lprobs_t, sample["target"], input_lengths,
             ):
                 lp = lp[:inp_l].unsqueeze(0)
                 decoded = None
@@ -220,11 +212,11 @@ class CtcWassersteinCriterion(CtcCriterion):
                         else:
                             decoded = decoded[0]
 
-                p = (t != self.task.source_dictionary.pad()) & (
-                    t != self.task.source_dictionary.eos()
+                p = (t != self.task.target_dictionary.pad()) & (
+                    t != self.task.target_dictionary.eos()
                 )
                 targ = t[p]
-                targ_units = self.task.source_dictionary.string(targ)
+                targ_units = self.task.target_dictionary.string(targ)
                 targ_units_arr = targ.tolist()
 
                 toks = lp.argmax(dim=-1).unique_consecutive()
@@ -235,7 +227,7 @@ class CtcWassersteinCriterion(CtcCriterion):
 
                 targ_words = post_process(targ_units, self.post_process).split()
 
-                pred_units = self.task.source_dictionary.string(pred_units_arr)
+                pred_units = self.task.target_dictionary.string(pred_units_arr)
                 pred_words_raw = post_process(pred_units, self.post_process).split()
 
                 if decoded is not None and "words" in decoded:
@@ -256,18 +248,38 @@ class CtcWassersteinCriterion(CtcCriterion):
         return logging_output
 
     def compute_wass_loss(self, ot_loss, encoder_out):
-        speech_out = encoder_out[0]["encoder_out"][0]  # S x B x D
-        text_out = encoder_out[-1]["encoder_out"][0]  # T x B x D
+        
+        if "adaptor_out" in encoder_out[0]:
+            key = "adaptor"
+        else:
+            key = "encoder"
+            
+        speech_out = encoder_out[0][f"{key}_out"][0].transpose(0, 1) # S x B x D
+        speech_lens = encoder_out[0][f"{key}_out_lengths"][0] # torch.Size([B])
+        speech_padding_mask = encoder_out[0][f"{key}_padding_mask"][0] # B x S
+        
+        text_out = encoder_out[1]["encoder_out"][0]  # T x B x D
+        text_lens = encoder_out[1]["src_lengths"][0].squeeze(-1) # torch.Size([B])
+        text_padding_mask = encoder_out[1]["encoder_padding_mask"][0] # B x T
 
+        S, B, _ = speech_out.size()
+        T = text_out.size()[0]
+        
+        if speech_padding_mask is not None:
+            non_padding_speech = ~speech_padding_mask # B x S
+        else:
+            non_padding_speech = (torch.ones(B, S) > 0).to(device=speech_out.device)
+            
+        if text_padding_mask is not None:
+            non_padding_text = ~text_padding_mask # B x T
+        else:
+            non_padding_text = (torch.ones(B, T) > 0).to(device=text_out.device)
+            
         if self.norm_before_ot:
             speech_out = speech_out / torch.linalg.norm(speech_out, dim=-1, keepdim=True)
             text_out = text_out / torch.linalg.norm(text_out, dim=-1, keepdim=True)
             
-        if self.ot_positional_weight > 0.0:
-            S, B, _ = speech_out.size()
-            T = text_out.size()[0]
-            speech_lens = encoder_out[0]["input_lengths"][0] # torch.Size([B]) 
-            text_lens = encoder_out[1]["src_lengths"][0].squeeze(-1) # torch.Size([B])
+        if self.ot_positional_weight > 0.0:            
             speech_lens[speech_lens <= 1] = 2
             text_lens[text_lens <= 1] = 2
             # create tensor in which the elements are range of lengths
@@ -284,16 +296,6 @@ class CtcWassersteinCriterion(CtcCriterion):
             speech_out = torch.cat((speech_out, speech_pos.unsqueeze(-1)), dim=-1)
             text_out = torch.cat((text_out, text_pos.unsqueeze(-1)), dim=-1)
             
-        if encoder_out[0]["encoder_padding_mask"]:
-            non_padding_speech = ~encoder_out[0]["encoder_padding_mask"][0] # B x S
-        else:
-            non_padding_speech = (torch.ones(B, S) > 0).to(device=speech_out.device)
-            
-        if encoder_out[1]["encoder_padding_mask"]:
-            non_padding_text = ~encoder_out[1]["encoder_padding_mask"][0] # B x T
-        else:
-            non_padding_text = (torch.ones(B, T) > 0).to(device=text_out.device)
-            
         speech_weights = (
             torch.ones_like(non_padding_speech) / 
             torch.sum(non_padding_speech, dim=-1).unsqueeze(-1) *
@@ -305,9 +307,9 @@ class CtcWassersteinCriterion(CtcCriterion):
             non_padding_text
         )
 
-        if self.detach_text_enc:
+        if self.detach_text_encoder:
             text_out = text_out.detach()
-
+        
         with torch.cuda.amp.autocast(enabled=False):
             wass_loss = ot_loss(
                 speech_weights.float(),
