@@ -6,34 +6,16 @@
 import os
 import logging
 from pathlib import Path
-import numpy as np
 import sys
 sys.path.append(os.environ['FAIRSEQ_ROOT'])
 
-from fairseq.data import (
-    Dictionary, 
-    data_utils, 
-    TokenBlockDataset,
-    PrependTokenDataset,
-    MaskTokensDataset,
-    SortDataset,
-    RightPadDataset,
-    NestedDictionaryDataset,
-    NumelDataset,
-    NumSamplesDataset,
-    IdDataset,
-)
-from fairseq.data.audio.multi_modality_dataset import (
-    MultiModalityDataset,
-    ModalityDatasetItem,
-)
+from fairseq.data import Dictionary
 from fairseq.data.audio.speech_to_text_joint_dataset import (
     S2TJointDataConfig,
 )
-from fairseq.data.audio.speech_to_text_joint_masked_dataset import (
-    SpeechToTextJointMaskedDatasetCreator,
+from fairseq.data.audio.speech_to_text_joint_dataset import (
+    SpeechToTextJointDatasetCreator
 )
-from fairseq.data.shorten_dataset import maybe_shorten_dataset
 from fairseq.tasks import register_task
 from examples.speech_text_joint_to_text.tasks.speech_text_joint import SpeechTextJointToTextTask
 
@@ -116,20 +98,6 @@ class SiameseSpeechTextToTextTask(SpeechTextJointToTextTask):
             default=400,
             help="maximum tokens for per encoder text input ",
         )
-        parser.add_argument(
-            "--mask-prob",
-            default=0.15,
-            type=float,
-            metavar="N",
-            help="",
-        )
-        parser.add_argument(
-            "--mask-multiple-length",
-            default=3,
-            type=float,
-            metavar="N",
-            help="",
-        )
 
     def __init__(self, args, src_dict, tgt_dict):
         super().__init__(args, src_dict, tgt_dict)
@@ -165,90 +133,13 @@ class SiameseSpeechTextToTextTask(SpeechTextJointToTextTask):
 
         return cls(args, src_dict, tgt_dict)
 
-    def load_monolingual_dataset(self, split, epoch=1, combine=False, **kwargs):
-        dataset = None
-        split = "train" if split.startswith("train") else "valid"
-        path = os.path.join(self.args.monolingual_text_data, split)
-        dataset = data_utils.load_indexed_dataset(
-                path,
-                self.source_dictionary,
-                combine=True,
-                dataset_impl=None,
-            )
-        dataset = maybe_shorten_dataset(
-            dataset,
-            split,
-            "",
-            None,
-            self.args.tokens_per_sample,
-            self.args.seed,
-        )
-        # create continuous blocks of tokens
-        dataset = TokenBlockDataset(
-            dataset,
-            dataset.sizes,
-            self.args.tokens_per_sample - 1,  # one less for <s>
-            pad=self.source_dictionary.pad(),
-            eos=self.source_dictionary.eos(),
-            break_mode="complete",
-        )
-        logger.info("loaded {} blocks".format(len(dataset)))
-
-        # prepend beginning-of-sentence token (<s>, equiv. to [CLS] in BERT)
-        dataset = PrependTokenDataset(dataset, self.source_dictionary.bos())
-
-        src_dataset, tgt_dataset = MaskTokensDataset.apply_mask(
-            dataset,
-            self.source_dictionary,
-            pad_idx=self.source_dictionary.pad(),
-            mask_idx=self.mask_idx,
-            seed=self.args.seed,
-            mask_prob=self.args.mask_prob,
-            leave_unmasked_prob=0.1,
-            random_token_prob=0.1,
-            freq_weighted_replacement=False,
-            mask_whole_words=None,
-            mask_multiple_length=int(self.args.mask_multiple_length),
-            mask_stdev=0.0,
-        )
-
-        with data_utils.numpy_seed(self.args.seed):
-            shuffle = np.random.permutation(len(src_dataset))
-
-        text_dataset = SortDataset(
-            NestedDictionaryDataset(
-                {
-                    "id": IdDataset(),
-                    "net_input": {
-                        "masked_src_txt_tokens": RightPadDataset(
-                            src_dataset,
-                            pad_idx=self.source_dictionary.pad(),
-                        ),
-                        "masked_src_lengths": NumelDataset(src_dataset, reduce=False),
-                    },
-                    "masked_target": RightPadDataset(
-                        tgt_dataset,
-                        pad_idx=self.source_dictionary.pad(),
-                    ),
-                    "nsentences": NumSamplesDataset(),
-                    "ntokens": NumelDataset(src_dataset, reduce=True),
-                },
-                sizes=[src_dataset.sizes],
-            ),
-            sort_order=[
-                shuffle,
-                src_dataset.sizes,
-            ],
-        )
-        return text_dataset
-
     def load_dataset(self, split, epoch=1, combine=False, **kwargs):
         is_train_split = split.startswith("train")
         pre_tokenizer = self.build_tokenizer(self.args)
         bpe_tokenizer = self.build_bpe(self.args)
         src_pre_tokenizer = self.build_src_tokenizer(self.args)
         src_bpe_tokenizer = self.build_src_bpe(self.args)
-        s2t_dataset = SpeechToTextJointMaskedDatasetCreator.from_tsv(
+        s2t_dataset = SpeechToTextJointDatasetCreator.from_tsv(
             self.args.data,
             self.data_cfg,
             split,
@@ -261,32 +152,9 @@ class SiameseSpeechTextToTextTask(SpeechTextJointToTextTask):
             is_train_split=is_train_split,
             epoch=epoch,
             seed=self.args.seed,
-            mask_sym=self.mask_sym,
-            mask_prob=self.args.mask_prob,
-            mask_multiple_length=int(self.args.mask_multiple_length),
-            speech_only=self.speech_only, 
+            append_eos=True,
+            use_src_lang_id=self.data_cfg.prepend_src_lang_tag
         )
-        text_dataset = None
-        if self.args.monolingual_text_data != "" and is_train_split:
-            text_dataset = self.load_monolingual_dataset(split, epoch=epoch)
-        if text_dataset is not None:
-            mdsets = [
-                ModalityDatasetItem(
-                    "sup_speech",
-                    s2t_dataset,
-                    (self.args.max_source_positions, self.args.max_target_positions),
-                    self.args.max_tokens,
-                    self.args.batch_size,
-                ),
-                ModalityDatasetItem(
-                    "text",
-                    text_dataset,
-                    (self.args.max_positions_text, self.args.max_target_positions),
-                    self.args.max_tokens_text if self.args.max_tokens_text is not None else self.args.max_tokens,
-                    self.args.batch_size,
-                ),
-            ]
-            s2t_dataset = MultiModalityDataset(mdsets)
         self.datasets[split] = s2t_dataset
 
     @property
