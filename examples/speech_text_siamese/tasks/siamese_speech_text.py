@@ -104,15 +104,7 @@ class SiameseSpeechTextToTextTask(SpeechTextJointToTextTask):
         self.src_dict = src_dict
         self.tgt_dict = tgt_dict
         self.data_cfg = S2TJointDataConfig(Path(args.data) / args.config_yaml)
-        self.speech_only = getattr(args, "load_speech_only", False)
-        self.mask_idx = None
-        self.mask_sym = "<mask>"
         self.args = args
-        if self.src_dict is not None:
-            assert self.tgt_dict.pad() == self.src_dict.pad()
-            assert self.tgt_dict.eos() == self.src_dict.eos()
-            if self.args.monolingual_text_data != "":
-                self.mask_idx = self.src_dict.add_symbol(self.mask_sym)
 
     @classmethod
     def setup_task(cls, args, **kwargs):
@@ -128,6 +120,12 @@ class SiameseSpeechTextToTextTask(SpeechTextJointToTextTask):
             logger.info(
                 f"source dictionary size ({data_cfg.src_vocab_filename}): " f"{len(src_dict):,}")
         tgt_dict = Dictionary.load(tgt_dict_path.as_posix())
+        
+        # correct the ctc dictionary
+        tgt_dict.symbols[0], tgt_dict.symbols[1] = tgt_dict.symbols[1], tgt_dict.symbols[0]
+        tgt_dict.indices["<s>"], tgt_dict.indices["<pad>"] = 1, 0
+        tgt_dict.bos_index, tgt_dict.pad_index = 1, 0
+
         logger.info(
             f"target dictionary size ({data_cfg.vocab_filename}): " f"{len(tgt_dict):,}")
 
@@ -159,6 +157,8 @@ class SiameseSpeechTextToTextTask(SpeechTextJointToTextTask):
 
     @property
     def source_dictionary(self):
-        """Return the source :class:`~fairseq.data.Dictionary` (if applicable
-        for this task)."""
         return self.src_dict
+
+    @property
+    def target_dictionary(self):
+        return self.tgt_dict
