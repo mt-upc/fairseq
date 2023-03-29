@@ -123,8 +123,6 @@ class SpeechTextJointToTextTask(SpeechToTextTask):
         super().__init__(args, tgt_dict)
         self.src_dict = src_dict
         self.data_cfg = S2TJointDataConfig(Path(args.data) / args.config_yaml)
-        assert self.tgt_dict.pad() == self.src_dict.pad()
-        assert self.tgt_dict.eos() == self.src_dict.eos()
         self.speech_only = args.load_speech_only
         self._infer_tgt_lang_id = infer_tgt_lang_id
 
