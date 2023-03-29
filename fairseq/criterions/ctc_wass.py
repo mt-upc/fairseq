@@ -119,9 +119,10 @@ class CtcWassersteinCriterion(CtcCriterion):
             loss += self.ctc_weight * ctc_loss
 
         if self.ot_weight > 0.0:
-            wass_loss = self.compute_wass_loss(self.ot_loss, encoder_out)
+            wass_loss, num_nans = self.compute_wass_loss(self.ot_loss, encoder_out)
             loss += self.ot_weight * wass_loss
             extra["wass_loss"] = wass_loss
+            extra["num_nans"] = num_nans
 
         logging_output = {
             "loss": utils.item(loss.data)
@@ -138,7 +139,13 @@ class CtcWassersteinCriterion(CtcCriterion):
             "sample_size": net_input["src_tokens"].size(0)
             if self.sentence_avg
             else sample["ntokens"],
+            "num_nans": utils.item(extra["num_nans"].data),
         }
+        
+        if "reduced_speech_output" in net_output[-1]:
+            logging_output["reduced_speech_output"] = utils.item(
+                net_output[-1]["reduced_speech_output"].data
+            )
 
         if not model.training and self.ctc_weight > 0.0:
             logging_output = self.compute_wer(
@@ -251,6 +258,8 @@ class CtcWassersteinCriterion(CtcCriterion):
         
         if "adaptor_out" in encoder_out[0]:
             key = "adaptor"
+        elif "compressed_out" in encoder_out[0]:
+            key = "compressed"
         else:
             key = "encoder"
             
@@ -279,7 +288,7 @@ class CtcWassersteinCriterion(CtcCriterion):
             speech_out = speech_out / torch.linalg.norm(speech_out, dim=-1, keepdim=True)
             text_out = text_out / torch.linalg.norm(text_out, dim=-1, keepdim=True)
             
-        if self.ot_positional_weight > 0.0:            
+        if self.ot_positional_weight > 0.0: 
             speech_lens[speech_lens <= 1] = 2
             text_lens[text_lens <= 1] = 2
             # create tensor in which the elements are range of lengths
@@ -316,9 +325,15 @@ class CtcWassersteinCriterion(CtcCriterion):
                 speech_out.float().transpose(0, 1).contiguous(),
                 text_weights.float(),
                 text_out.float().transpose(0, 1).contiguous()
-            ).sum()
+            )
+            if torch.any(torch.isnan(wass_loss)):
+                num_nans = torch.sum(torch.isnan(wass_loss))
+                wass_loss = torch.nansum(wass_loss)
+            else:
+                num_nans = torch.tensor(0)
+                wass_loss = torch.sum(wass_loss)
             
-        return wass_loss
+        return wass_loss, num_nans
 
     @staticmethod
     def reduce_metrics(logging_outputs) -> None:

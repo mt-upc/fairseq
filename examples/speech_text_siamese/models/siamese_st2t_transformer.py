@@ -43,11 +43,9 @@ def build_embedding(dictionary, embed_dim):
 
 
 class CTCDecoder(FairseqDecoder):
-    def __init__(self, dictionary, embed_dim, task, dropout_rate=0.0, bias=True, layernorm=False):
+    def __init__(self, dictionary, embed_dim, dropout_rate=0.0, bias=True, layernorm=False):
         super().__init__(dictionary)
-        self.blank_idx = (
-            dictionary.index(task.blank_symbol) if hasattr(task, "blank_symbol") else 0
-        )
+        self.blank_idx = 1
         self.pad_idx = dictionary.pad()
         self.eos_idx = dictionary.eos()
         if layernorm:
@@ -97,8 +95,7 @@ class SiameseSpeechTextEncoders(FairseqEncoder):
         self.text_encoder = text_encoder
         if adaptor is not None:
             self.adaptor = adaptor
-        self.shrink_speech_output = getattr(args, "shrink_speech_output", False)
-        self.zero_speech_output = getattr(args, "zero_speech_output", False)
+        self.use_ctc_compression = getattr(args, "use_ctc_compression", False)
         self.freeze_text_encoder = getattr(args, "freeze_text_encoder", False)
         self.retain_dropout_in_frozen_text_encoder = \
             getattr(args, "retain_dropout_in_frozen_text_encoder", False)
@@ -295,22 +292,12 @@ class SiameseST2TTransformerModel(FairseqEncoderDecoderModel):
             "--conv1d-adaptor-stride", type=int, default=2, help="stride in conv1d adaptor"
         )
         parser.add_argument(
-            "--shrink-speech-output",
+            "--use-ctc-compression",
             action="store_true",
-            help="Shrink speech encoder's output based on CTC module",
-        )
-        parser.add_argument(
-            "--zero-speech-output",
-            action="store_true",
-            help="Zero out speech encoder's output based on CTC module",
+            help="Apply CTC compression to speech encoder's output",
         )
         parser.add_argument(
             "--freeze-text-encoder", action="store_true", help="Freeze text encoder"
-        )
-        parser.add_argument(
-            "--speech-encoder-with-adapter",
-            action="store_true",
-            help="use speech encoder with adapter",
         )
         parser.add_argument(
             "--no-cnn-in-adapter", action="store_true", help="no CNN module in adapter"
@@ -395,9 +382,8 @@ class SiameseST2TTransformerModel(FairseqEncoderDecoderModel):
     def build_decoder(cls, args, task, encoder):
         if args.ctc_weight > 0:
             decoder = CTCDecoder(
-                task.source_dictionary,
+                task.target_dictionary,
                 encoder.spch_encoder.embed_dim,
-                task,
                 encoder.spch_encoder.final_dropout.p,
                 layernorm=getattr(args, "w2v_ctc_layer_id", -1) != -1,
             )
@@ -406,7 +392,7 @@ class SiameseST2TTransformerModel(FairseqEncoderDecoderModel):
             decoder.proj = encoder.spch_encoder.proj
             
         else:
-            decoder = DummyDecoder(task.source_dictionary)
+            decoder = DummyDecoder(task.target_dictionary)
 
         return decoder
 
@@ -455,6 +441,67 @@ class SiameseST2TTransformerModel(FairseqEncoderDecoderModel):
             return utils.log_softmax(logits, dim=-1)
         else:
             return utils.softmax(logits, dim=-1)
+        
+    def ctc_compression(self, decoder_out, encoder_out):
+        
+        def pad_seq_given_lens_arrays(input, lengths, padding_value=0.0):
+            cum_len = 0
+            y = []
+            for _, val in enumerate(lengths):
+                y.append(input[cum_len : cum_len + val])
+                cum_len += val
+            return torch.nn.utils.rnn.pad_sequence(
+                y, batch_first=True, padding_value=padding_value
+            )
+
+        speech_out = encoder_out[0]["encoder_out"][0].transpose(0, 1) # T x B x D
+        lprobs_ctc = F.log_softmax(decoder_out[0], dim=-1).contiguous()  # T x B x V
+        preds = torch.argmax(lprobs_ctc, dim=-1).contiguous()  # T x B
+        
+        T, B, D = speech_out.size()
+        speech_out = speech_out.transpose(0, 1)
+        preds = preds.transpose(0, 1)
+        speech_out_compr = []
+        preds_after_merged = []
+        reduced_t = 0
+        
+        for i in range(B):
+            p, c = preds[i].unique_consecutive(return_counts=True, dim=0)
+
+            speech_out_splt = torch.split(speech_out[i], c.tolist())
+            out = torch.stack([t.mean(dim=0) for t in speech_out_splt])
+            
+            speech_out_compr.append(out)
+            preds_after_merged.append(p)
+            reduced_t += torch.sum(c[~c.eq(1)]) - torch.numel(c[~c.eq(1)])
+
+        speech_out_compr = torch.nn.utils.rnn.pad_sequence(speech_out_compr, batch_first=True)  # B x T x D
+        preds_after_merged = torch.nn.utils.rnn.pad_sequence(
+            preds_after_merged,
+            batch_first=True,
+            padding_value=self.decoder.pad_idx,
+        )
+        # Get mask of elements which are blank
+        non_blank_mask = ~preds_after_merged.eq(self.decoder.pad_idx)
+        # Get new lengths
+        lengths = torch.sum(non_blank_mask, dim=-1)
+        
+        speech_out_compr = speech_out_compr.masked_select(non_blank_mask.unsqueeze(-1)).view(-1, D)
+        speech_out_compr = pad_seq_given_lens_arrays(speech_out_compr, lengths)
+        
+        reduced_t += torch.sum(~non_blank_mask)
+        reduced_t = reduced_t / (T * B)
+        
+        speech_out_compr_mask = (torch.arange(speech_out_compr.size(1), device=speech_out_compr.device).expand(
+            speech_out_compr.size(0), -1) >= lengths.unsqueeze(1)).bool()
+        
+        decoder_out[-1]["reduced_speech_output"] = reduced_t
+
+        encoder_out[0]["compressed_out"] = [speech_out_compr]
+        encoder_out[0]["compressed_padding_mask"] = [speech_out_compr_mask]
+        encoder_out[0]["compressed_out_lengths"] = [lengths]
+        
+        return decoder_out, encoder_out
 
     def set_num_updates(self, num_updates):
         """Set the number of parameters updates."""
@@ -485,126 +532,9 @@ class SiameseST2TTransformerModel(FairseqEncoderDecoderModel):
         else:
             raise NotImplementedError
 
-        def zero_speech_output(speech_out, preds):
-            """
-            Zero elements in x (corresponding to repeated consecutive
-                                values or blank index in preds)
-            Args:
-                x: T x B x D
-                preds: T x B
-            """
-            preds = preds.double()
-            D = speech_out.size()[-1]
-            T, B = preds.size()
-            # get indices to be removed (blank tokens) and merge repeated predictions into 1
-            # construct a difference matrix having below format
-            # [[ 1,  0,  0,  0,  ...],
-            #  [-1,  1,  0,  0,  ...],
-            #  [ 0, -1,  1,  0,  ...],
-            #  [ 0,  0, -1,  1,  ...],
-            diff_matrix = (
-                (torch.triu(torch.tril(torch.ones(T, T) * -1), -1) + torch.eye(T) * 2)
-                .to(preds.device)
-                .double()
-            )  # T x T
-            diff_preds = torch.matmul(diff_matrix, preds)  # T x B
-            blank_idx = (
-                self.decoder.blank_idx
-                if isinstance(self.decoder, CTCDecoder)
-                else self.decoder.ctc_module.blank_idx
-            )
-            m = ~(preds.eq(blank_idx) | diff_preds.eq(0))  # T x B
-            reduced_t = T * B - torch.sum(m)
-            m = m.transpose(0, 1).unsqueeze(2).expand(-1, -1, D)  # B x T x D
-            speech_out = speech_out.transpose(0, 1) * m  # B x T x D
-            return speech_out.transpose(0, 1), reduced_t / (T * B)
-
-        def pad_seq_given_lens_arrays(input, lengths, padding_value=0.0):
-            """
-            Reshape and pad an input tensor given lengths of each chunk in the tensor
-            """
-            cum_len = 0
-            y = []
-            for _, val in enumerate(lengths):
-                y.append(input[cum_len : cum_len + val])
-                cum_len += val
-            return torch.nn.utils.rnn.pad_sequence(
-                y, batch_first=True, padding_value=padding_value
-            )
-
-        def shrink_speech_output(speech_out, preds):
-            """
-            Average elements in x correponsing to repeated consecutive values in preds
-            Args:
-                x: T x B x D
-                preds: T x B
-            """
-            # iterate through batch dimension
-            T, B, D = speech_out.size()
-            speech_out = speech_out.transpose(0, 1)
-            preds = preds.transpose(0, 1)
-            Y = []
-            preds_after_merged = []
-            reduced_t = 0
-            for i in range(B):
-                p, c = preds[i].unique_consecutive(return_counts=True, dim=0)
-                # create a padded tensor of shape num_chunks x max_len_chunks x D
-                padded = pad_seq_given_lens_arrays(speech_out[i], c)  # N x S x D
-                # sum over each chunk and divide by lengths
-                out = torch.sum(padded, dim=1) / c.unsqueeze(-1).expand(-1, D)
-                Y.append(out)
-                preds_after_merged.append(p)
-                reduced_t += torch.sum(c[~c.eq(1)]) - torch.numel(c[~c.eq(1)])
-
-            Y = torch.nn.utils.rnn.pad_sequence(Y, batch_first=True)  # B x T x D
-            preds_after_merged = torch.nn.utils.rnn.pad_sequence(
-                preds_after_merged,
-                batch_first=True,
-                padding_value=self.decoder.pad_idx,
-            )
-            # Get mask of elements which are blank
-            non_blank_mask = ~preds_after_merged.eq(self.decoder.blank_idx)
-            # if preds_after_merged are all blank then not reducing
-            non_blank_mask = (
-                ~non_blank_mask if torch.all(~non_blank_mask) else non_blank_mask
-            )
-            reduced_t += torch.sum(~non_blank_mask)
-            # Get new lengths
-            lengths = torch.sum(non_blank_mask, dim=-1)
-            Y = Y.masked_select(non_blank_mask.unsqueeze(-1)).view(-1, D)
-            Y = pad_seq_given_lens_arrays(Y, lengths)
-            return Y.transpose(0, 1), reduced_t / (T * B)
-
-        assert isinstance(self.decoder, CTCDecoder)
-        speech_out = decoder_out[0]  # T x B x V
-        x = speech_out
-
-        # Shrink speech output
-        if self.encoder.shrink_speech_output or self.encoder.zero_speech_output:
+        if self.encoder.use_ctc_compression:
             assert isinstance(self.decoder, CTCDecoder)
-            ctc_out = (
-                decoder_out[0]
-                if isinstance(self.decoder, CTCDecoder)
-                else decoder_out[0][1]
-                if isinstance(decoder_out[0], tuple)
-                else decoder_out[0]
-            )
-            lprobs_ctc = F.log_softmax(ctc_out, dim=-1).contiguous()  # T x B x V
-            preds = torch.argmax(lprobs_ctc, dim=-1).contiguous()  # T x B
-
-            if self.encoder.zero_speech_output:
-                x, reduced_t = zero_speech_output(speech_out, preds)
-            elif self.encoder.shrink_speech_output:
-                x, reduced_t = shrink_speech_output(speech_out, preds)
-            else:
-                raise NotImplementedError
-
-            decoder_out[-1]["reduced_speech_output"] = reduced_t
-
-            if isinstance(encoder_out, tuple):
-                encoder_out[0]["encoder_out"] = [x]  # T x B x D or T x B x V
-            else:
-                encoder_out["encoder_out"] = [x]  # T x B x D or T x B x V
+            decoder_out, encoder_out = self.ctc_compression(decoder_out, encoder_out)            
 
         return decoder_out, encoder_out
 
