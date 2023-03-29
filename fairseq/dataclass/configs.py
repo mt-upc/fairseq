@@ -711,6 +711,12 @@ class CheckpointConfig(FairseqDataclass):
     no_last_checkpoints: bool = field(
         default=False, metadata={"help": "don't store last checkpoints"}
     )
+    no_absolute_best_checkpoints: bool = field(
+        default=False, metadata={"help": "don't store the absolute best checkpoints seperately"}
+    )
+    no_interval_updates_checkpoints: bool = field(
+        default=False, metadata={"help": "don't store checkpoints with --save-interval-updates"}
+    )
     no_save_optimizer_state: bool = field(
         default=False,
         metadata={"help": "don't save optimizer-state as part of checkpoint"},
