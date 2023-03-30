@@ -2,11 +2,12 @@ import contextlib
 import re
 import logging
 from dataclasses import dataclass, field
-from omegaconf import II, DictConfig
+from omegaconf import II, DictConfig, OmegaConf
 from typing import Any, Optional, Dict, List, Type
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from fairseq.data import Dictionary
 from fairseq.data.data_utils import lengths_to_padding_mask
@@ -32,6 +33,7 @@ from fairseq.models.hubert import (
     HubertConfig,
     HubertAsrConfig,
 )
+from fairseq.models.speechlm import SpeechLM, SpeechLMConfig
 from fairseq.models.transformer import (
     TransformerModelBase,
     TransformerDecoder,
@@ -345,7 +347,10 @@ class S2TPretrainedEncoder(FairseqEncoder, S2TPretrainedComponent):
         FairseqEncoder.__init__(self, dictionary=None)
         S2TPretrainedComponent.__init__(self, cfg)
         
-        self.embed_dim = cfg["pre_args"]["model"]["w2v_args"]["model"].encoder_embed_dim
+        if safe_hasattr(cfg["pre_args"]["model"], "w2v_args"):
+            self.embed_dim = cfg["pre_args"]["model"]["w2v_args"]["model"].encoder_embed_dim
+        else:
+            self.embed_dim = cfg["pre_args"]["model"]["encoder_embed_dim"]
         self.component_type = "ENCODER"
         self.coupling_modules = nn.ModuleList()
 
@@ -356,6 +361,8 @@ class S2TPretrainedEncoder(FairseqEncoder, S2TPretrainedComponent):
             return PretrainedWav2VecEncoder
         elif name.startswith('hubert'):
             return PretrainedHubertEncoder
+        elif name.startswith('speechlm'):
+            return PretrainedSpeechLMEncoder
         else:
             raise ValueError(f"Unknown encoder name: {name}")
 
@@ -512,7 +519,7 @@ class PretrainedWav2VecBaseEncoder(S2TPretrainedEncoder):
                 continue                                    # This layers are not used
             new_state_dict[k] = v
 
-        return super().load_state_dict(new_state_dict, strict=strict)
+        return super(S2TPretrainedEncoder, self).load_state_dict(new_state_dict, strict=strict)
 
     def pre_forward(self, src_tokens, src_lengths, **kwargs):
         encoder_in = super().pre_forward(src_tokens, src_lengths, **kwargs)
@@ -581,6 +588,44 @@ class PretrainedHubertEncoder(PretrainedWav2VecBaseEncoder, HubertEncoder):
     def __init__(self, cfg: S2TPretrainedEncoderConfig):
         PretrainedWav2VecBaseEncoder.__init__(self, cfg)
         HubertEncoder.__init__(self, cfg.pre_args.model, HubertDummyTask(None))
+
+
+class PretrainedSpeechLMEncoder(PretrainedWav2VecBaseEncoder):
+    """ Pretrained SpeechLM encoder """
+
+    PRETRAIN_MODEL_NAME = 'speechlm'
+    FINETUNE_MODEL_NAME = 'speechlm_ctc'
+    MODEL_CFG = SpeechLMConfig
+
+    def __init__(self, cfg: S2TPretrainedEncoderConfig):
+        PretrainedWav2VecBaseEncoder.__init__(self, cfg)
+        speechlm_cfg_dict = OmegaConf.to_container(cfg.pre_args.model)
+        self.speechlm = SpeechLM(SpeechLMConfig(speechlm_cfg_dict))
+
+    @classmethod
+    def build(cls, cfg: S2TPretrainedEncoderConfig) -> 'SpeechLM':
+        return cls(cfg)
+
+    def forward(self, src_tokens, src_lengths, **kwargs):
+        encoder_inputs = self.pre_forward(src_tokens, src_lengths, **kwargs)
+        if self.speechlm.cfg.layer_norm_first:
+            encoder_inputs['source'] = F.layer_norm(
+                encoder_inputs['source'],
+                encoder_inputs['source'][0].shape
+            )  
+        encoder_out = self.speechlm.forward(**encoder_inputs, features_only=True)
+        encoder_out['encoder_out'] = encoder_out.pop('x').transpose(0, 1)
+        _ = encoder_out.pop('features')
+        _ = encoder_out.pop('layer_results')
+        return self.post_forward(encoder_out)
+
+    def load_state_dict(self, state_dict, strict=True):
+        new_state_dict = {}
+        for k, v in state_dict.items():
+            k = f"speechlm.{k}"
+            new_state_dict[k] = v
+
+        return super(S2TPretrainedEncoder, self).load_state_dict(new_state_dict, strict=strict)
 
 
 class S2TPretrainedDecoder(FairseqDecoder, S2TPretrainedComponent):
