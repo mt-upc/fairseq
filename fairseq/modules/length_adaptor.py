@@ -67,36 +67,36 @@ class Conv1dAdaptor(nn.Module):
         super().__init__()
         self.proj, self.proj_ln = None, None
         self.post_proj, self.post_proj_ln = None, None
-        if cfg.proj:
+        if cfg.projection:
             self.proj = nn.Sequential(
-                nn.Linear(cfg.in_dim, cfg.in_dim * 4), nn.ReLU(), nn.Linear(cfg.in_dim * 4, cfg.in_dim)
+                nn.Linear(cfg.in_channels, cfg.in_channels * 4), nn.ReLU(), nn.Linear(cfg.in_channels * 4, cfg.in_channels)
             )
-            self.proj_ln = LayerNorm(cfg.in_dim)
+            self.proj_ln = LayerNorm(cfg.in_channels)
             self.post_proj = nn.Sequential(
-                nn.Linear(cfg.out_dim, cfg.out_dim * 4),
+                nn.Linear(cfg.out_channels, cfg.out_channels * 4),
                 nn.ReLU(),
-                nn.Linear(cfg.out_dim * 4, cfg.out_dim),
+                nn.Linear(cfg.out_channels * 4, cfg.out_channels),
             )
-            self.post_proj_ln = LayerNorm(cfg.out_dim)
+            self.post_proj_ln = LayerNorm(cfg.out_channels)
 
-        mid_dim = cfg.out_dim if not cfg.mid_dim else cfg.mid_dim
+        cfg.mid_channels = cfg.out_channels if not cfg.mid_channels else cfg.mid_channels
         dim_factor = 2 if cfg.activation_fn == 'glu' else 1
         self.layers = nn.ModuleList(
             nn.Conv1d(
-                cfg.in_dim if i == 0 else mid_dim,
-                (cfg.out_dim if i == (cfg.n_layers - 1) else mid_dim) * dim_factor,
+                cfg.in_channels if i == 0 else cfg.mid_channels,
+                (cfg.out_channels if i == (cfg.num_layers - 1) else cfg.mid_channels) * dim_factor,
                 cfg.kernel_size,
                 stride=cfg.stride,
                 padding=cfg.kernel_size // 2,
             )
-            for i in range(cfg.n_layers)
+            for i in range(cfg.num_layers)
         )
         self.activation_fn = partial(nn.functional.glu, dim=1) \
             if cfg.activation_fn == 'glu' else \
             utils.get_activation_fn(cfg.activation_fn)
         self.stride = cfg.stride
         self.layerdrop = cfg.layerdrop
-        self.layernorm = LayerNorm(cfg.in_dim) if cfg.layernorm else None
+        self.layernorm = LayerNorm(cfg.in_channels) if cfg.layernorm else None
 
     def forward(self, x, padding_mask: Optional[torch.Tensor]):
         if self.layernorm is not None:
