@@ -371,20 +371,13 @@ class S2TPretrainedEncoder(FairseqEncoder, S2TPretrainedComponent):
     def add_coupling_modules(self, cfg: CouplingConfig) -> None:
         self.coupling_modules = nn.ModuleList()
         if cfg.conv1d_adaptor:
-            self.coupling_modules.append(
-                Conv1dAdaptor(
-                    in_dim=cfg.conv1d_adaptor.in_channels,
-                    out_dim=cfg.conv1d_adaptor.out_channels,
-                    mid_dim=cfg.conv1d_adaptor.mid_channels,
-                    n_layers=cfg.conv1d_adaptor.num_layers,
-                    kernel_size=cfg.conv1d_adaptor.kernel_size,
-                    stride=cfg.conv1d_adaptor.stride,
-                    layerdrop=cfg.conv1d_adaptor.layerdrop,
-                    layernorm=cfg.conv1d_adaptor.layernorm,
-                    proj=cfg.conv1d_adaptor.projection,
-                    activation_fn=cfg.conv1d_adaptor.activation_fn,
-                )
-            )
+            if hasattr(cfg.conv1d_adaptor, "path") and cfg.conv1d_adaptor.path != "":
+                ckpt = torch.load(cfg.conv1d_adaptor.path, map_location='cpu')
+                adaptor = Conv1dAdaptor(ckpt["cfg"])
+                adaptor.load_state_dict(ckpt["model"])
+            else:
+                adaptor = Conv1dAdaptor(cfg)
+            self.coupling_modules.append(adaptor)
         if cfg.modality_adapter:
             self.coupling_modules.append(
                 ModalityAdapter(cfg.modality_adapter)

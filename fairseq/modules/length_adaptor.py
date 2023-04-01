@@ -1,6 +1,6 @@
 from functools import partial
-from typing import List, Optional
-from omegaconf import II, DictConfig
+from typing import Optional
+from omegaconf import II
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -57,55 +57,46 @@ class Conv1dAdaptorConfig(FairseqDataclass):
         default="glu",
         metadata={"help": "activation function"}
     )
+    path: str = field(
+        default="", metadata={"help": "path to the pretrained adaptor model"}
+    )
 
 
 class Conv1dAdaptor(nn.Module):
-    def __init__(
-        self,
-        in_dim,
-        out_dim,
-        mid_dim=None,
-        n_layers=3,
-        kernel_size=3,
-        stride=2,
-        layerdrop=0.0,
-        layernorm=False,
-        proj=False,
-        activation_fn='glu',
-    ):
+    def __init__(self, cfg: Conv1dAdaptorConfig):
         super().__init__()
         self.proj, self.proj_ln = None, None
         self.post_proj, self.post_proj_ln = None, None
-        if proj:
+        if cfg.proj:
             self.proj = nn.Sequential(
-                nn.Linear(in_dim, in_dim * 4), nn.ReLU(), nn.Linear(in_dim * 4, in_dim)
+                nn.Linear(cfg.in_dim, cfg.in_dim * 4), nn.ReLU(), nn.Linear(cfg.in_dim * 4, cfg.in_dim)
             )
-            self.proj_ln = LayerNorm(in_dim)
+            self.proj_ln = LayerNorm(cfg.in_dim)
             self.post_proj = nn.Sequential(
-                nn.Linear(out_dim, out_dim * 4),
+                nn.Linear(cfg.out_dim, cfg.out_dim * 4),
                 nn.ReLU(),
-                nn.Linear(out_dim * 4, out_dim),
+                nn.Linear(cfg.out_dim * 4, cfg.out_dim),
             )
-            self.post_proj_ln = LayerNorm(out_dim)
+            self.post_proj_ln = LayerNorm(cfg.out_dim)
 
-        mid_dim = out_dim if not mid_dim else mid_dim
-        dim_factor = 2 if activation_fn == 'glu' else 1
+        mid_dim = cfg.out_dim if not cfg.mid_dim else cfg.mid_dim
+        dim_factor = 2 if cfg.activation_fn == 'glu' else 1
         self.layers = nn.ModuleList(
             nn.Conv1d(
-                in_dim if i == 0 else mid_dim,
-                (out_dim if i == (n_layers - 1) else mid_dim) * dim_factor,
-                kernel_size,
-                stride=stride,
-                padding=kernel_size // 2,
+                cfg.in_dim if i == 0 else mid_dim,
+                (cfg.out_dim if i == (cfg.n_layers - 1) else mid_dim) * dim_factor,
+                cfg.kernel_size,
+                stride=cfg.stride,
+                padding=cfg.kernel_size // 2,
             )
-            for i in range(n_layers)
+            for i in range(cfg.n_layers)
         )
         self.activation_fn = partial(nn.functional.glu, dim=1) \
-            if activation_fn == 'glu' else \
-            utils.get_activation_fn(activation_fn)
-        self.stride = stride
-        self.layerdrop = layerdrop
-        self.layernorm = LayerNorm(in_dim) if layernorm else None
+            if cfg.activation_fn == 'glu' else \
+            utils.get_activation_fn(cfg.activation_fn)
+        self.stride = cfg.stride
+        self.layerdrop = cfg.layerdrop
+        self.layernorm = LayerNorm(cfg.in_dim) if cfg.layernorm else None
 
     def forward(self, x, padding_mask: Optional[torch.Tensor]):
         if self.layernorm is not None:
