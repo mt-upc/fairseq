@@ -64,6 +64,10 @@ class S2TJointDataConfig(S2TDataConfig):
     @property
     def prepend_src_lang_tag(self):
         return self.config.get("prepend_src_lang_tag", False)
+    
+    @property
+    def cached_encoder_representations(self):
+        return self.config.get("cached_encoder_representations", None)
 
 
 class SpeechToTextJointDatasetItem(NamedTuple):
@@ -74,6 +78,8 @@ class SpeechToTextJointDatasetItem(NamedTuple):
     tgt_lang_tag: Optional[int] = None
     src_lang_tag: Optional[int] = None
     tgt_alignment: Optional[torch.Tensor] = None
+    id: Optional[str] = None
+    src_txt_repr: Optional[torch.Tensor] = None
 
 
 # use_src_lang_id:
@@ -126,6 +132,8 @@ class SpeechToTextJointDataset(SpeechToTextDataset):
         self.src_pre_tokenizer = src_pre_tokenizer
         self.src_bpe_tokenizer = src_bpe_tokenizer
         self.alignment = None
+        if cfg.cached_encoder_representations is not None:
+            self.cached_encoder_representations = Path(cfg.cached_encoder_representations)
         self.use_src_lang_id = use_src_lang_id
         if alignment is not None:
             self.alignment = [
@@ -157,6 +165,14 @@ class SpeechToTextJointDataset(SpeechToTextDataset):
         ali = None
         if self.alignment is not None:
             ali = torch.Tensor(self.alignment[index]).float()
+        if hasattr(self, "cached_encoder_representations"):
+            src_txt_repr = torch.load(
+                self.cached_encoder_representations / f"{s2t_dataset_item.id}.pt",
+                map_location=torch.device("cpu")
+            )
+            assert src_txt_repr.shape[0] == src_tokens.shape[0] + 1 # no lang tag yet
+        else:
+            src_txt_repr = None
 
         return SpeechToTextJointDatasetItem(
             index=index,
@@ -166,6 +182,8 @@ class SpeechToTextJointDataset(SpeechToTextDataset):
             tgt_lang_tag=tgt_lang_tag,
             src_lang_tag=src_lang_tag,
             tgt_alignment=ali,
+            id=s2t_dataset_item.id,
+            src_txt_repr=src_txt_repr
         )
 
     def __len__(self):
@@ -207,6 +225,15 @@ class SpeechToTextJointDataset(SpeechToTextDataset):
             src_txt_lengths = src_txt_lengths.index_select(0, order)
             net_input["src_txt_tokens"] = src_txt_tokens
             net_input["src_txt_lengths"] = src_txt_lengths
+            
+        if hasattr(self, "cached_encoder_representations"):
+            src_txt_repr = [x.src_txt_repr for x in samples]
+            lengths = torch.tensor([x.size(0) for x in src_txt_repr], dtype=torch.long)
+            src_txt_repr = torch.nn.utils.rnn.pad_sequence(src_txt_repr, batch_first=True)
+            src_txt_repr = src_txt_repr.index_select(0, order)
+            lengths = lengths.index_select(0, order)
+            net_input["src_txt_repr"] = src_txt_repr
+            net_input["src_txt_repr_lengths"] = lengths
 
         net_input["alignment"] = None
         if self.alignment is not None:
@@ -223,6 +250,7 @@ class SpeechToTextJointDataset(SpeechToTextDataset):
 
         out = {
             "id": s2t_out["id"],
+            "example_id": s2t_out["example_id"],
             "net_input": net_input,
             "target": s2t_out["target"],
             "target_lengths": s2t_out["target_lengths"],
