@@ -69,7 +69,7 @@ class CtcCriterion(FairseqCriterion):
         self.blank_idx = (
             task.target_dictionary.index(task.blank_symbol)
             if hasattr(task, "blank_symbol")
-            else 0
+            else task.target_dictionary.pad()
         )
         self.pad_idx = task.target_dictionary.pad()
         self.eos_idx = task.target_dictionary.eos()
