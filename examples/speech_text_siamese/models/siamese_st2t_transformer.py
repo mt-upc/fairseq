@@ -2,6 +2,7 @@
 
 import logging
 from typing import Optional
+from dataclasses import dataclass, field
 
 import torch
 import torch.nn as nn
@@ -24,6 +25,7 @@ from fairseq.modules.fairseq_dropout import FairseqDropout
 from fairseq.modules.length_adaptor import Conv1dAdaptor, Conv1dAdaptorConfig
 from fairseq.models.transformer.transformer_config import TransformerConfig
 from fairseq.modules.transformer_layer import TransformerEncoderLayerBase
+from fairseq.dataclass import FairseqDataclass
 from omegaconf import OmegaConf
 
 logger = logging.getLogger(__name__)
@@ -71,26 +73,61 @@ class TransformerEncoderLayers(nn.Module):
         return x
     
 
+@dataclass
+class CTCDecoderConfig(FairseqDataclass):
+    embed_dim: int = field(
+        default=1024, metadata={"help": "embedding dimension"}
+    )
+    dropout_rate: float = field(
+        default=0.0, metadata={"help": "dropout rate before the ctc projection layer"}
+    )
+    ctc_compression: bool = field(
+        default=False, metadata={"help": "whether to use ctc-based compression"}
+    )
+    ctc_compression_type: str = field(
+        default="letter", metadata={"help": "ctc-based compression type: letter or word"}
+    )
+    post_compression_layer: bool = field(
+        default=False, metadata={"help": "whether to use post-compression layer"}
+    )
+    pooling_fn: str = field(
+        default="mean", metadata={"help": "pooling function: max, mean, attention"}
+    )
+    layernorm: bool = field(
+        default=False, metadata={"help": "whether to use layer normalization before ctc projection layer"}
+    )
+
 class CTCDecoder(FairseqDecoder):
-    def __init__(self, dictionary, embed_dim, dropout_rate=0.0, ctc_compression=False, layernorm=False):
+    def __init__(self, dictionary, cfg: CTCDecoderConfig):
         super().__init__(dictionary)
         
-        self.dictionary = dictionary
-        self.embed_dim = embed_dim        
+        
+        self.cfg = cfg
+        self.dictionary = dictionary      
         self.blank_idx = dictionary.pad() # TODO have to check for other encoders.
+        self.sep_token = "|"
+        self.sep_idx = dictionary.symbols.index(self.sep_token)
         
         # only if the expected input is not the final output of the speech encoder
-        if layernorm:
-            self.layer_norm = LayerNorm(embed_dim)
+        if cfg.layernorm:
+            self.layer_norm = LayerNorm(cfg.embed_dim)
             
-        self.dropout_module = FairseqDropout(dropout_rate)
-        self.proj = Linear(embed_dim, len(dictionary), bias=True)
-        
-        self.ctc_compression = ctc_compression
-        self.min_frames = 2
+        self.dropout_module = FairseqDropout(cfg.dropout_rate)
+        self.proj = Linear(cfg.embed_dim, len(dictionary), bias=True)
         
         logging.info(f"| dictionary for CTC module: {len(dictionary)} types")
-        logging.info(f"| CTC-based compression: {ctc_compression}")
+        logging.info(f"| CTC-based compression: {cfg.ctc_compression}")
+        logging.info(f"| CTC-based compression type: {cfg.ctc_compression_type}")
+        
+        if cfg.ctc_compression and cfg.post_compression_layer:
+            self.post = nn.Sequential(
+                LayerNorm(cfg.embed_dim),
+                nn.Linear(cfg.embed_dim, 4 * cfg.embed_dim),
+                nn.GELU(),
+                nn.Linear(4 * cfg.embed_dim, cfg.embed_dim),
+            )
+            logging.info(f"| post-compression layer: True")
+        
 
     def forward(self, speech_out):        
         if "ctc_layer_result" in speech_out and speech_out["ctc_layer_result"] is not None:
@@ -107,32 +144,115 @@ class CTCDecoder(FairseqDecoder):
         return x.transpose(0, 1), {"attn": [], "inner_states": None}
     
     def compress(self, decoder_out, speech_out):
+        if self.cfg.ctc_compression_type == "letter":
+            return self.compress_letter(decoder_out, speech_out)
+        elif self.cfg.ctc_compression_type == "word":
+            return self.compress_word(decoder_out, speech_out)
+        else:
+            raise NotImplementedError
+          
+    def pool(self, x):       
+        if self.cfg.pooling_fn == "mean":
+            return torch.mean(x, dim=0)
+        elif self.cfg.pooling_fn == "max":
+            return torch.max(x, dim=0)[0]
+        elif self.cfg.pooling_fn == "attention":
+            # TODO
+            raise NotImplementedError
+        
+        
+    def compress_word(self, decoder_out, speech_out):
+        x = speech_out["encoder_out"][0].transpose(0, 1) # T x B x D
+        prev_lengths = speech_out["encoder_out_lengths"][0]
+        
+        with torch.no_grad():
+            lprobs_ctc = F.log_softmax(decoder_out[0], dim=-1)  # T x B x V
+            preds = torch.argmax(lprobs_ctc, dim=-1)  # T x B
+        
+        T, B, D = x.size()
+        x = x.transpose(0, 1) # B x T x D
+        preds = preds.transpose(0, 1) # B x T
+        
+        separetor_mask = preds == self.sep_idx
+        valid_mask = preds != self.blank_idx
+        
+        t = valid_mask.sum(dim=-1).max().item()
+        x_compr = torch.zeros(B, t, D, device=x.device, dtype=x.dtype)
+        # preds_compr = []
+
+        for i in range(B):
+            # p = []
+            if valid_mask[i].sum() == 0:
+                continue
+            x_i = x[i, valid_mask[i]] # TODO chec if underlying memory is the same
+            sep_indices = torch.nonzero(separetor_mask[i, valid_mask[i]]).squeeze()
+            if sep_indices.dim() == 0:
+                x_compr[i, 0] = self.pool(x_i)
+            else:
+                prev_idx = -1
+                j = 0
+                for idx in sep_indices:
+                    if idx != prev_idx + 1:
+                        x_compr[i, j] = self.pool(x_i[prev_idx+1:idx])
+                        j += 1
+                        # p.append(preds[i, prev_idx+1:idx].tolist())
+                    prev_idx = idx
+            # preds_compr.append(p)
+
+        lengths_compr = (x_compr.sum(dim=-1) != self.blank_idx).sum(dim=-1) # B
+        
+        max_length = lengths_compr.max().item()
+        if not max_length:
+            return decoder_out, speech_out
+        
+        x_compr = x_compr[:, :max_length]
+        x_compr_mask = lengths_to_padding_mask(lengths_compr)
+
+        if hasattr(self, "post"):
+            x_compr = self.post(x_compr)
+            
+        decoder_out[-1]["compression_rate"] = (prev_lengths.float() - lengths_compr.float()) / prev_lengths.float()
+        
+        assert x_compr.size(0) == speech_out["encoder_out"][0].size(0)
+        speech_out["modified_out"] = [x_compr]
+        speech_out["modified_padding_mask"] = [x_compr_mask]
+        speech_out["modified_out_lengths"] = [lengths_compr]
+    
+        return decoder_out, speech_out
+    
+    def compress_letter(self, decoder_out, speech_out):
 
         x = speech_out["encoder_out"][0].transpose(0, 1) # T x B x D
         prev_lengths = speech_out["encoder_out_lengths"][0]
-        lprobs_ctc = F.log_softmax(decoder_out[0], dim=-1).contiguous()  # T x B x V
-        preds = torch.argmax(lprobs_ctc, dim=-1).contiguous()  # T x B
         
-        _, B, D = x.size()
+        with torch.no_grad():
+            lprobs_ctc = F.log_softmax(decoder_out[0], dim=-1)  # T x B x V
+            preds = torch.argmax(lprobs_ctc, dim=-1)  # T x B
+        
+        T, B, D = x.size()
         x = x.transpose(0, 1)
         preds = preds.transpose(0, 1)
-        x_compr = []
-        preds_after_merged = []
+
+        x_compr = torch.zeros(B, T, D, device=x.device, dtype=x.dtype)
+        preds_after_merged = torch.zeros(B, T, dtype=torch.long, device=preds.device)
+        
+        # breakpoint()
+        
         for i in range(B):
-            p, c = preds[i].unique_consecutive(return_counts=True, dim=0)
+            p, c = preds[i].unique_consecutive(return_counts=True)
 
             x_splt = torch.split(x[i], c.tolist())
             out = torch.stack([t.mean(dim=0) for t in x_splt])
-            
-            x_compr.append(out)
-            preds_after_merged.append(p)
 
-        x_compr = torch.nn.utils.rnn.pad_sequence(x_compr, batch_first=True)  # B x T x D
-        preds_after_merged = torch.nn.utils.rnn.pad_sequence(
-            preds_after_merged,
-            batch_first=True,
-            padding_value=self.blank_idx,
-        )
+            x_compr[i, :out.size(0)] = out
+            preds_after_merged[i, :p.size(0)] = p
+            
+        mask = preds_after_merged == self.blank_idx
+        preds_after_merged.masked_fill_(mask, 0)
+        x_compr.masked_fill_(mask.unsqueeze(-1), 0)
+        
+        # breakpoint()
+
         # Get mask of elements which are blank
         non_blank_mask = ~preds_after_merged.eq(self.blank_idx)
         # Get new lengths
@@ -141,15 +261,19 @@ class CTCDecoder(FairseqDecoder):
         x_compr = x_compr.masked_select(non_blank_mask.unsqueeze(-1)).view(-1, D)
         x_compr = self._pad_seq_given_lens_arrays(x_compr, lengths)
         
-        # need at least 2 frames for the length adaptor
-        L = x_compr.size(1)
-        if L < self.min_frames:
-            x_compr = torch.cat([x_compr, torch.zeros(B, self.min_frames - L, D, device=x_compr.device)], dim=1)
+        # breakpoint()
+        
+        if not x_compr.size(1):
+            logging.info("No frames left after CTC compression. Returning original output.")
+            return decoder_out, speech_out
         
         x_compr_mask = (torch.arange(x_compr.size(1), device=x_compr.device).expand(
             x_compr.size(0), -1) >= lengths.unsqueeze(1)).bool()
         
         decoder_out[-1]["compression_rate"] = (prev_lengths.float() - lengths.float()) / prev_lengths.float()
+        
+        if hasattr(self, "post"):
+            x_compr = self.post(x_compr)
 
         assert x_compr.size(0) == speech_out["encoder_out"][0].size(0)
         speech_out["modified_out"] = [x_compr]
@@ -157,16 +281,17 @@ class CTCDecoder(FairseqDecoder):
         speech_out["modified_out_lengths"] = [lengths]
         
         return decoder_out, speech_out
-    
+
     def _pad_seq_given_lens_arrays(self, input, lengths, padding_value=0.0):
+        max_len = max(lengths)
+        B = len(lengths)
+        D = input.size(-1)
+        padded = torch.full((B, max_len, D), padding_value, device=input.device, dtype=input.dtype)
         cum_len = 0
-        y = []
-        for _, val in enumerate(lengths):
-            y.append(input[cum_len : cum_len + val])
+        for i, val in enumerate(lengths):
+            padded[i, :val] = input[cum_len : cum_len + val]
             cum_len += val
-        return torch.nn.utils.rnn.pad_sequence(
-            y, batch_first=True, padding_value=padding_value
-        )
+        return padded
 
 class SiameseSpeechTextEncoders(FairseqEncoder):
     def __init__(
@@ -182,6 +307,7 @@ class SiameseSpeechTextEncoders(FairseqEncoder):
     ):
         super().__init__(dictionary)
 
+        self.args = args
         self.spch_encoder = spch_encoder
         
         if text_encoder is not None:
@@ -196,7 +322,6 @@ class SiameseSpeechTextEncoders(FairseqEncoder):
             self.eos_embedding = eos_embedding
 
         self.ctc_layer_id = args.w2v_ctc_layer_id
-        self.adaptor_after_context = args.adaptor_after_context
         self.freeze_text_encoder = args.freeze_text_encoder
         self.retain_dropout_in_frozen_text_encoder = args.retain_dropout_in_frozen_text_encoder
         self.freeze_speech_encoder_layers = args.freeze_speech_encoder_layers
@@ -204,6 +329,7 @@ class SiameseSpeechTextEncoders(FairseqEncoder):
 
         self._maybe_freeze_text_encoder()  
         self._maybe_freeze_speech_encoder_layers()
+        self._maybe_freeze_context_encoder()
 
     @classmethod
     def build_speech_encoder(cls, args):
@@ -253,6 +379,9 @@ class SiameseSpeechTextEncoders(FairseqEncoder):
 
     @classmethod
     def build_text_encoder(cls, args, src_dictionary):
+        if args.only_ctc:
+            return None
+        
         ckpt = torch.load(args.mbart_path)
         
         if ckpt["args"] is None:
@@ -287,7 +416,7 @@ class SiameseSpeechTextEncoders(FairseqEncoder):
     
     @classmethod
     def build_context_encoder(cls, args, text_encoder):
-        if not args.use_context_encoder:
+        if args.only_ctc or not args.use_context_encoder:
             return None, args
         
         transformer_cfg = TransformerConfig()
@@ -314,7 +443,7 @@ class SiameseSpeechTextEncoders(FairseqEncoder):
     
     @classmethod
     def build_adaptor(cls, args, spch_encoder):
-        if not args.conv1d_adaptor_layers:
+        if args.only_ctc or not args.conv1d_adaptor_layers:
             return None, args
         
         adaptor_cfg = Conv1dAdaptorConfig()
@@ -331,25 +460,28 @@ class SiameseSpeechTextEncoders(FairseqEncoder):
         return adaptor, args
     
     @classmethod
-    def build_special_embeddings(cls, args, spch_encoder, text_encoder):
+    def build_special_embeddings(cls, args, spch_encoder, text_encoder, requires_grad=False):
         eos_idx, bos_idx = 2, -49
+        eos_token, bos_token = "</s>", "<lang:en>"
         bos_emb, eos_emb = None, None
         
-        if args.use_bos_embedding:
+        if not args.only_ctc and args.use_bos_embedding:
             if text_encoder is not None:
-                assert text_encoder.dictionary.symbols[bos_idx] == "<lang:en>"
+                assert text_encoder.dictionary.symbols[bos_idx] == bos_token
                 weights = text_encoder.embed_tokens.weight[bos_idx].data
+                logging.info(f"Using BOS embedding from text encoder: {bos_token} with requires_grad={requires_grad}")
             else:
                 weights = torch.zeros(spch_encoder.embed_dim)
-            bos_emb = nn.Parameter(weights, requires_grad=True)
+            bos_emb = nn.Parameter(weights, requires_grad=requires_grad)
             
-        if args.use_eos_embedding:
+        if not args.only_ctc and args.use_eos_embedding:
             if text_encoder is not None:
-                assert text_encoder.dictionary.symbols[eos_idx] == "</s>"
+                assert text_encoder.dictionary.symbols[eos_idx] == eos_token
                 weights = text_encoder.embed_tokens.weight[eos_idx].data
+                logging.info(f"Using EOS embedding from text encoder: {eos_token} with requires_grad={requires_grad}")
             else:
                 weights = torch.zeros(spch_encoder.embed_dim)
-            eos_emb = nn.Parameter(weights, requires_grad=True)
+            eos_emb = nn.Parameter(weights, requires_grad=requires_grad)
 
         return bos_emb, eos_emb
 
@@ -432,9 +564,9 @@ class SiameseSpeechTextEncoders(FairseqEncoder):
         x = self.context_encoder(x, padding_mask)
         
         assert x.size(0) == speech_out[f"{key}_out"][0].size(0)
-        speech_out["modified_out"] = [x]
-        speech_out["modified_out_lengths"] = speech_out[f"{key}_out_lengths"]
-        speech_out["modified_padding_mask"] = speech_out[f"{key}_padding_mask"]
+        speech_out["context_out"] = [x]
+        speech_out["context_out_lengths"] = speech_out[f"{key}_out_lengths"]
+        speech_out["context_padding_mask"] = speech_out[f"{key}_padding_mask"]
         
         return speech_out
     
@@ -510,6 +642,14 @@ class SiameseSpeechTextEncoders(FairseqEncoder):
                         layer.dropout1.p = 0.0
                         layer.dropout2.p = 0.0
                         layer.dropout3.p = 0.0
+                        
+    def _maybe_freeze_context_encoder(self):
+        if hasattr(self, "context_encoder") and not self.args.ot_weight:
+            logging.info(f"Freezing context encoder ...")
+            for n, p in self.context_encoder.named_parameters():
+                logging.info(f"- freezing {n}")
+                p.requires_grad = False
+        # no need to deactivate dropout, it;s only gonna used during inference
 
 @register_model("siamese_st2t_transformer")
 class SiameseST2TTransformerModel(FairseqEncoderDecoderModel):
@@ -519,15 +659,6 @@ class SiameseST2TTransformerModel(FairseqEncoderDecoderModel):
 
     @staticmethod
     def add_args(parser):
-        # parser.add_argument(
-        #     "--dropout", type=float, metavar="D", help="dropout probability"
-        # )
-        # parser.add_argument(
-        #     "--activation-dropout", type=float, metavar="D", help="attention dropout probability"
-        # )
-        # parser.add_argument(
-        #     "--attention-dropout", type=float, metavar="D", help="activation dropout probability"
-        # )
         parser.add_argument(
             "--conv1d-adaptor-layers", type=int, default=0, help="number of layers in conv1d adaptor"
         )
@@ -610,10 +741,6 @@ class SiameseST2TTransformerModel(FairseqEncoderDecoderModel):
             "--context-activation-dropout", type=float, metavar="D", help="context encoder activation dropout"
         )
         parser.add_argument(
-            "--adaptor-after-context", type=str, default="false",
-            help="apply adaptor after context encoder, default is to apply before it"
-        )
-        parser.add_argument(
             "--freeze-speech-encoder-layers", type=int, default=-1,
             help="freeze the speech encoder layers with id < freeze-speech-encoder-layers"
             "-1 means no freezing, 0 means freeze feature-extractor, 1 means freeze feature-extractor and encoder.layer.0, etc..."
@@ -633,6 +760,18 @@ class SiameseST2TTransformerModel(FairseqEncoderDecoderModel):
         parser.add_argument(
             "--use-eos-embedding", type=str, default="false",
             help="use eos embedding in the output of the speech encoder"
+        )
+        parser.add_argument(
+            "--ctc-compression-type", type=str, default="letter", choices=["letter", "word"],
+            help="type of CTC compression"
+        )
+        parser.add_argument(
+            "--ctc-post-compression-layer", type=str, default="false",
+            help="apply a linear layer after CTC compression"
+        )
+        parser.add_argument(
+            "--ctc-compression-pooling-fn", type=str, default="mean", choices=["mean", "max", "attention"],
+            help="pooling function to use for CTC compression"
         )
         
     @classmethod
@@ -658,20 +797,26 @@ class SiameseST2TTransformerModel(FairseqEncoderDecoderModel):
 
     @classmethod
     def build_decoder(cls, args, task, encoder):
-        if args.ctc_weight > 0:
-            decoder = CTCDecoder(
-                task.target_dictionary,
-                encoder.spch_encoder.embed_dim,
-                encoder.spch_encoder.final_dropout.p,
-                ctc_compression=args.ctc_compression,
-                layernorm=(args.w2v_ctc_layer_id != -1),
-            )
-            # initialized the decoder's projection layer with the encoder's ctc projection layer
-            decoder.proj = encoder.spch_encoder.proj
-        else:
+        if args.ctc_weight == 0.0:
             decoder = DummyDecoder(task.target_dictionary)
-
-        return decoder
+            return decoder, args
+            
+        ctc_decoder_cfg = CTCDecoderConfig()
+        ctc_decoder_cfg.embed_dim = encoder.spch_encoder.embed_dim
+        ctc_decoder_cfg.dropout = encoder.spch_encoder.final_dropout.p
+        ctc_decoder_cfg.ctc_compression = args.ctc_compression
+        ctc_decoder_cfg.ctc_compression_type = args.ctc_compression_type
+        ctc_decoder_cfg.post_compression_layer = args.ctc_post_compression_layer
+        ctc_decoder_cfg.pooling_fn = args.ctc_compression_pooling_fn
+        ctc_decoder_cfg.layernorm = args.w2v_ctc_layer_id != -1
+        
+        decoder = CTCDecoder(task.target_dictionary, ctc_decoder_cfg)
+        # initialized the decoder's projection layer with the encoder's ctc projection layer
+        decoder.proj = encoder.spch_encoder.proj
+        
+        args.ctc_decoder_cfg = ctc_decoder_cfg
+        
+        return decoder, args
 
     @classmethod
     def build_model(cls, args, task):
@@ -681,8 +826,9 @@ class SiameseST2TTransformerModel(FairseqEncoderDecoderModel):
         args.w2v_ctc_layer_id = getattr(args, "w2v_ctc_layer_id", -1)
         args.conv1d_adaptor_layers = getattr(args, "conv1d_adaptor_layers", 0)
         args.freeze_speech_encoder_layers = getattr(args, "freeze_speech_encoder_layers", -1)
+        args.ctc_compression_type = getattr(args, "ctc_compression_type", "letter")
+        args.ctc_compression_pooling_fn = getattr(args, "ctc_compression_pooling_fn", "mean")
         args.freeze_text_encoder = default_bool("freeze_text_encoder")
-        args.adaptor_after_context = default_bool("adaptor_after_context")
         args.use_context_encoder = default_bool("use_context_encoder")
         args.retain_dropout_in_frozen_text_encoder = default_bool("retain_dropout_in_frozen_text_encoder")
         args.ctc_compression = default_bool("ctc_compression")
@@ -691,9 +837,11 @@ class SiameseST2TTransformerModel(FairseqEncoderDecoderModel):
         args.no_text_encoder = default_bool("no_text_encoder")
         args.use_bos_embedding = default_bool("use_bos_embedding")
         args.use_eos_embedding = default_bool("use_eos_embedding")
-
+        args.ctc_post_compression_layer = default_bool("ctc_post_compression_layer")
+        args.only_ctc = not args.ot_weight and not args.ot_emb_weight
+        
         encoder = cls.build_encoder(args, task)
-        decoder = cls.build_decoder(args, task, encoder)
+        decoder, args = cls.build_decoder(args, task, encoder)
         
         # do it after initializing the decoder to transfer the ctc weights
         encoder.spch_encoder.w2v_model.remove_pretraining_modules()
@@ -732,31 +880,22 @@ class SiameseST2TTransformerModel(FairseqEncoderDecoderModel):
         super().set_num_updates(num_updates)
         self.num_updates = num_updates
 
-    def forward(
-        self,
-        src_tokens=None,
-        src_lengths=None,
-        src_txt_tokens=None,
-        src_txt_lengths=None,
-    ):
+    def forward(self, src_tokens, src_lengths, src_txt_tokens=None, src_txt_lengths=None):
         speech_out = self.encoder.forward_speech(src_tokens, src_lengths)
         
         decoder_out = None
         if isinstance(self.decoder, CTCDecoder):
             decoder_out = self.decoder(speech_out)
-            
-            if self.decoder.ctc_compression:
+
+            if self.decoder.cfg.ctc_compression:
                 decoder_out, speech_out = self.decoder.compress(decoder_out, speech_out)
                 
         speech_out = self.encoder.apply_special_embeddings(speech_out)
         
-        if not self.encoder.adaptor_after_context:
-            speech_out = self.encoder.forward_adaptor(speech_out)
-            
-        speech_out = self.encoder.forward_context(speech_out)
+        speech_out = self.encoder.forward_adaptor(speech_out)
         
-        if self.encoder.adaptor_after_context:
-            speech_out = self.encoder.forward_adaptor(speech_out)
+        if self.encoder.args.ot_weight > 0.0:
+            speech_out = self.encoder.forward_context(speech_out)
         
         text_out = self.encoder.forward_text(src_txt_tokens, src_txt_lengths)
         
