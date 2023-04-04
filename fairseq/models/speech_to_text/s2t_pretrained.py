@@ -383,7 +383,7 @@ class S2TPretrainedEncoder(FairseqEncoder, S2TPretrainedComponent):
                 adaptor = Conv1dAdaptor(ckpt["cfg"])
                 adaptor.load_state_dict(ckpt["model"])
             else:
-                adaptor = Conv1dAdaptor(cfg)
+                adaptor = Conv1dAdaptor(cfg.conv1d_adaptor)
             self.coupling_modules.append(adaptor)
         if cfg.modality_adapter:
             self.coupling_modules.append(
