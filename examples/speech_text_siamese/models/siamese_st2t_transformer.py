@@ -219,9 +219,10 @@ class SiameseSpeechTextEncoders(FairseqEncoder):
             return None
         
         adaptor_cfg = Conv1dAdaptorConfig()
-        adaptor_cfg.in_dim = spch_encoder.embed_dim
-        adaptor_cfg.out_dim = spch_encoder.embed_dim
-        adaptor_cfg.n_layers = args.conv1d_adaptor_layers
+        adaptor_cfg.in_channels = spch_encoder.embed_dim
+        adaptor_cfg.out_channels = spch_encoder.embed_dim
+        adaptor_cfg.mid_channels = spch_encoder.embed_dim
+        adaptor_cfg.num_layers = args.conv1d_adaptor_layers
         adaptor_cfg.kernel_size = args.conv1d_adaptor_kernel_size
         adaptor_cfg.stride = args.conv1d_adaptor_stride
         
@@ -241,7 +242,7 @@ class SiameseSpeechTextEncoders(FairseqEncoder):
             if text_encoder is not None:
                 assert text_encoder.dictionary.symbols[bos_idx] == bos_token
                 weights = text_encoder.embed_tokens.weight[bos_idx].data
-                logging.info(f"Using BOS embedding from text encoder: {bos_token} with requires_grad={requires_grad}")
+                logger.info(f"Using BOS embedding from text encoder: {bos_token} with requires_grad={requires_grad}")
             else:
                 weights = torch.zeros(spch_encoder.embed_dim)
             bos_emb = nn.Parameter(weights, requires_grad=requires_grad)
@@ -250,7 +251,7 @@ class SiameseSpeechTextEncoders(FairseqEncoder):
             if text_encoder is not None:
                 assert text_encoder.dictionary.symbols[eos_idx] == eos_token
                 weights = text_encoder.embed_tokens.weight[eos_idx].data
-                logging.info(f"Using EOS embedding from text encoder: {eos_token} with requires_grad={requires_grad}")
+                logger.info(f"Using EOS embedding from text encoder: {eos_token} with requires_grad={requires_grad}")
             else:
                 weights = torch.zeros(spch_encoder.embed_dim)
             eos_emb = nn.Parameter(weights, requires_grad=requires_grad)
@@ -384,14 +385,14 @@ class SiameseSpeechTextEncoders(FairseqEncoder):
     
     def _maybe_freeze_text_encoder(self):
         if hasattr(self, "text_encoder") and self.freeze_text_encoder:
-            logging.info(f"Freezing text encoder ...")
+            logger.info(f"Freezing text encoder ...")
             for n, p in self.text_encoder.named_parameters():
-                logging.info(f"- freezing {n}")
+                logger.info(f"- freezing {n}")
                 p.requires_grad = False
                 
     def _maybe_freeze_speech_encoder_layers(self):
         if self.freeze_speech_encoder_layers > -1:
-            logging.info(f"Freezing speech encoder feature extractor ...")
+            logger.info(f"Freezing speech encoder feature extractor ...")
             ft_layers = [
                 ("feature_extractor", self.spch_encoder.w2v_model.feature_extractor),
                 ("post_extract_proj", self.spch_encoder.w2v_model.post_extract_proj),
@@ -399,15 +400,15 @@ class SiameseSpeechTextEncoders(FairseqEncoder):
             ]
             for name, layer in ft_layers:
                 for n, p in layer.named_parameters():
-                    logging.info(f"- freezing {name} {n}")
+                    logger.info(f"- freezing {name} {n}")
                     p.requires_grad = False
                 
         if self.freeze_speech_encoder_layers > 0:
-            logging.info(f"Freezing speech encoder layers ...")
+            logger.info(f"Freezing speech encoder layers ...")
             for i, layer in enumerate(self.spch_encoder.w2v_model.encoder.layers):
                 if i < self.freeze_speech_encoder_layers:
                     for n, p in layer.named_parameters():
-                        logging.info(f"- freezing layer{i} {n}")
+                        logger.info(f"- freezing layer{i} {n}")
                         p.requires_grad = False
                     if not self.retain_dropout_in_frozen_speech_encoder:
                         layer.self_attn.dropout_module.p = 0.0
@@ -417,9 +418,9 @@ class SiameseSpeechTextEncoders(FairseqEncoder):
                         
     def _maybe_freeze_context_encoder(self):
         if hasattr(self, "context_encoder") and not self.args.ot_weight:
-            logging.info(f"Freezing context encoder ...")
+            logger.info(f"Freezing context encoder ...")
             for n, p in self.context_encoder.named_parameters():
-                logging.info(f"- freezing {n}")
+                logger.info(f"- freezing {n}")
                 p.requires_grad = False
         # no need to deactivate dropout, it;s only gonna used during inference
 
@@ -575,7 +576,7 @@ class SiameseST2TTransformerModel(FairseqEncoderDecoderModel):
             
         ctc_decoder_cfg = CTCDecoderConfig()
         ctc_decoder_cfg.embed_dim = encoder.spch_encoder.embed_dim
-        ctc_decoder_cfg.dropout = encoder.spch_encoder.final_dropout.p
+        ctc_decoder_cfg.dropout_rate = encoder.spch_encoder.final_dropout.p
         ctc_decoder_cfg.ctc_compression = args.ctc_compression
         ctc_decoder_cfg.ctc_compression_type = args.ctc_compression_type
         ctc_decoder_cfg.post_compression_layer = args.ctc_post_compression_layer
