@@ -1,6 +1,5 @@
 from functools import partial
 from typing import Optional
-from omegaconf import II
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -26,7 +25,7 @@ class Conv1dAdaptorConfig(FairseqDataclass):
         metadata={"help": "# of output channels in the Conv1d Adaptor"}
     )
     mid_channels: int = field(
-        default=II("model.encoder.length_adaptor.out_channels"),
+        default=None,
         metadata={"help": "# of intermediate channels in the Conv1d Adaptor"}
     )
     num_layers: int = field(
