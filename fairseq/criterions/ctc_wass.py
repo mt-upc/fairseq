@@ -31,12 +31,16 @@ SAMPLE_LOSS_CHOICES = ChoiceEnum(
 @dataclass
 class CtcWassersteinCriterionConfig(CtcCriterionConfig):
     ctc_weight: float = field(
-        default=1.0,
+        default=0.0,
         metadata={"help": "Weight for CTC loss"},
     )
     ot_weight: float = field(
-        default=0.1,
+        default=0.0,
         metadata={"help": "Weight for OT loss"},
+    )
+    ot_emb_weight: float = field(
+        default=0.0,
+        metadata={"help": "Weight for OT loss between the text embedding and output of the speech encoder"},
     )
     norm_before_ot: bool = field(
         default=False,
@@ -62,11 +66,7 @@ class CtcWassersteinCriterionConfig(CtcCriterionConfig):
         default=1.0,
         metadata={"help": "Weight for OT positional embeddings"},
     )
-    detach_text_encoder: bool = field(
-        default=False,
-        metadata={"help": "Detach text encoder from the graph"},
-    ) # TODO: currently there is also freeze-text-enc. unify them
-    extract_text_representations: bool = field(
+    extract_text_representations_mode: bool = field(
         default=False,
         metadata={"help": "Extract encoder representations mode, not training."},
     )
@@ -85,20 +85,21 @@ class CtcWassersteinCriterion(CtcCriterion):
 
         self.ctc_weight = cfg.ctc_weight
         self.ot_weight = cfg.ot_weight
+        self.ot_emb_weight = cfg.ot_emb_weight
 
-        self.detach_text_encoder = cfg.detach_text_encoder
         self.norm_before_ot = cfg.norm_before_ot
         self.ot_loss = cfg.ot_loss
         self.ot_p = cfg.ot_p
         self.ot_blur = cfg.ot_blur
         self.ot_scaling = cfg.ot_scaling
         self.ot_positional_weight = cfg.ot_positional_weight
-        self.extract_text_representations = cfg.extract_text_representations
+        self.extract_text_representations_mode = cfg.extract_text_representations_mode
         self.extract_save_dir = Path(cfg.extract_save_dir)
 
         logging.info(f"*** Loss function ***")
         logging.info(f"ctc_weight = {self.ctc_weight}")
         logging.info(f"ot_weight = {self.ot_weight}")
+        logging.info(f"ot_emb_weight = {self.ot_emb_weight}")
         logging.info(
             f"ot_loss = {self.ot_loss}, ot_p = {self.ot_p}, ot_blur = {self.ot_blur}, ot_scaling = {self.ot_scaling}"
         )
@@ -112,8 +113,8 @@ class CtcWassersteinCriterion(CtcCriterion):
         net_output, encoder_out = model(
             src_tokens=net_input["src_tokens"],
             src_lengths=net_input["src_lengths"],
-            src_txt_tokens=net_input["src_txt_tokens"],
-            src_txt_lengths=net_input["src_txt_lengths"],
+            src_txt_tokens=net_input["src_txt_tokens"] if "src_txt_tokens" in net_input else None,
+            src_txt_lengths=net_input["src_txt_lengths"] if "src_txt_lengths" in net_input else None,
         )
         sample_size = (
             net_input["src_tokens"].size(0)
@@ -121,24 +122,11 @@ class CtcWassersteinCriterion(CtcCriterion):
             else sample["ntokens"]
         )
 
-        if self.extract_text_representations:
-            x = encoder_out[1]["encoder_out"][0].detach().clone().transpose(0, 1) # B x T x C
-            x_emb = encoder_out[1]["embed_src_tokens"][0].detach().clone().transpose(0, 1) # B x T x C
-            lengths = encoder_out[1]["src_lengths"][0].squeeze(-1) # B
-            
-            for i in range(len(x)):
-                id = sample["example_id"][i]
-                file_path = self.extract_save_dir / f"{id}.pt"
-                if not file_path.exists():
-                    x_i = x[i, :lengths[i], :].contiguous()
-                    torch.save(x_i, file_path)
-                file_path = self.extract_save_dir / f"{id}_emb.pt"
-                if not file_path.exists():
-                    x_emb_i = x_emb[i, :lengths[i], :].contiguous()
-                    torch.save(x_emb_i, file_path)
+        if self.extract_text_representations_mode:
+            self.extract_text_representations(encoder_out, sample)
 
         loss = 0.0
-        extra = {"ctc_loss": 0.0, "wass_loss": 0.0}
+        extra = {"ctc_loss": 0.0, "wass_loss": 0.0, "wass_emb_loss": 0.0}
 
         if self.ctc_weight > 0.0:
             ctc_loss, extra = self.compute_ctc_loss(
@@ -150,6 +138,16 @@ class CtcWassersteinCriterion(CtcCriterion):
             wass_loss = self.compute_wass_loss(self.ot_loss, encoder_out, net_input)
             loss += self.ot_weight * wass_loss
             extra["wass_loss"] = wass_loss
+        elif self.ot_emb_weight > 0.0 and not model.training:
+            speech_out = model.encoder.forward_context(encoder_out[0])
+            encoder_out = (speech_out, encoder_out[1])
+            wass_loss = self.compute_wass_loss(self.ot_loss, encoder_out, net_input)
+            extra["wass_loss"] = wass_loss
+
+        if self.ot_emb_weight > 0.0:
+            wass_emb_loss = self.compute_wass_loss(self.ot_loss, encoder_out, net_input, is_embedding=True)
+            loss += self.ot_emb_weight * wass_emb_loss
+            extra["wass_emb_loss"] = wass_emb_loss
 
         logging_output = {
             "loss": utils.item(loss.data)
@@ -160,6 +158,9 @@ class CtcWassersteinCriterion(CtcCriterion):
             else 0.0,
             "wass_loss": utils.item(extra["wass_loss"].data)
             if extra["wass_loss"] != 0.0
+            else 0.0,
+            "wass_emb_loss": utils.item(extra["wass_emb_loss"].data)
+            if extra["wass_emb_loss"] != 0.0
             else 0.0,
             "ntokens": sample["ntokens"],
             "nsentences": sample["id"].numel(),
@@ -274,26 +275,51 @@ class CtcWassersteinCriterion(CtcCriterion):
             logging_output["c_errors"] = c_err
             logging_output["c_total"] = c_len
         return logging_output
-
-    def compute_wass_loss(self, ot_loss, encoder_out, net_input):
+    
+    def _get_speech_repr(self, encoder_out, is_embedding=False):
         
-        if "modified_out" in encoder_out[0]:
-            key = "modified"
+        if is_embedding:
+            if "modified_out" in encoder_out[0]:
+                key = "modified"
+            else:
+                key = "encoder"
         else:
-            key = "encoder"
+            if "context_out" in encoder_out[0]:
+                key = "context"
+            elif "modified_out" in encoder_out[0]:
+                key = "modified"
+            else:
+                key = "encoder"
             
         speech_out = encoder_out[0][f"{key}_out"][0].transpose(0, 1) # S x B x D
         speech_lens = encoder_out[0][f"{key}_out_lengths"][0] # torch.Size([B])
         speech_padding_mask = encoder_out[0][f"{key}_padding_mask"][0] # B x S
         
+        return speech_out, speech_lens, speech_padding_mask
+    
+    def _get_text_repr(self, net_input, encoder_out, is_embedding=False):
+        
         if "src_txt_repr" in net_input:
-            text_out = net_input["src_txt_repr"].transpose(0, 1) # T x B x D
-            text_lens = net_input["src_txt_repr_lengths"] # torch.Size([B])
+            if is_embedding:
+                text_out = net_input["src_txt_emb"].transpose(0, 1)
+            else:
+                text_out = net_input["src_txt_repr"].transpose(0, 1) # T x B x D
+            text_lens = net_input["src_txt_lengths"] # torch.Size([B])
             text_padding_mask = lengths_to_padding_mask(text_lens) # B x T
         else:
-            text_out = encoder_out[1]["encoder_out"][0]  # T x B x D
+            if is_embedding:
+                text_out = encoder_out[1]["embed_src_tokens"][0]
+            else:
+                text_out = encoder_out[1]["encoder_out"][0]  # T x B x D
             text_lens = encoder_out[1]["src_lengths"][0].squeeze(-1) # torch.Size([B])
             text_padding_mask = encoder_out[1]["encoder_padding_mask"][0] # B x T
+        
+        return text_out, text_lens, text_padding_mask
+
+    def compute_wass_loss(self, ot_loss, encoder_out, net_input, is_embedding=False):
+        
+        speech_out, speech_lens, speech_padding_mask = self._get_speech_repr(encoder_out, is_embedding)
+        text_out, text_lens, text_padding_mask = self._get_text_repr(net_input, encoder_out, is_embedding)
             
         S, B, _ = speech_out.size()
         T = text_out.size()[0]
@@ -352,9 +378,6 @@ class CtcWassersteinCriterion(CtcCriterion):
             torch.sum(non_padding_text, dim=-1).unsqueeze(-1) *
             non_padding_text
         )
-
-        if self.detach_text_encoder:
-            text_out = text_out.detach()
             
         with torch.cuda.amp.autocast(enabled=False):
             wass_loss = ot_loss(
@@ -365,6 +388,22 @@ class CtcWassersteinCriterion(CtcCriterion):
             ).sum()
             
         return wass_loss
+    
+    def extract_text_representations(self, encoder_out, sample):
+        x = encoder_out[1]["encoder_out"][0].detach().clone().transpose(0, 1) # B x T x C
+        x_emb = encoder_out[1]["embed_src_tokens"][0].detach().clone().transpose(0, 1) # B x T x C
+        lengths = encoder_out[1]["src_lengths"][0].squeeze(-1) # B
+        
+        for i in range(len(x)):
+            id = sample["example_id"][i]
+            file_path = self.extract_save_dir / f"{id}.pt"
+            if not file_path.exists():
+                x_i = x[i, :lengths[i], :].contiguous()
+                torch.save(x_i, file_path)
+            file_path = self.extract_save_dir / f"{id}_emb.pt"
+            if not file_path.exists():
+                x_emb_i = x_emb[i, :lengths[i], :].contiguous()
+                torch.save(x_emb_i, file_path)
 
     @staticmethod
     def reduce_metrics(logging_outputs) -> None:
@@ -376,6 +415,9 @@ class CtcWassersteinCriterion(CtcCriterion):
         )
         wass_loss_sum = utils.item(
             sum(log.get("wass_loss", 0) for log in logging_outputs)
+        )
+        wass_emb_loss_sum = utils.item(
+            sum(log.get("wass_emb_loss", 0) for log in logging_outputs)
         )
         ntokens = utils.item(sum(log.get("ntokens", 0) for log in logging_outputs))
 
@@ -400,6 +442,13 @@ class CtcWassersteinCriterion(CtcCriterion):
             metrics.log_scalar(
                 "wass_loss",
                 wass_loss_sum / sample_size / math.log(2),
+                sample_size,
+                round=3,
+            )
+        if wass_emb_loss_sum != 0:
+            metrics.log_scalar(
+                "wass_emb_loss",
+                wass_emb_loss_sum / sample_size / math.log(2),
                 sample_size,
                 round=3,
             )
