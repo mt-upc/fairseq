@@ -10,11 +10,13 @@ from fairseq.dataclass import FairseqDataclass
 from fairseq.models import FairseqDecoder
 from fairseq.modules import FairseqDropout, LayerNorm
 
+logger = logging.getLogger(__name__)
+
 
 def Linear(in_features, out_features, bias=True):
     m = nn.Linear(in_features, out_features, bias)
     nn.init.xavier_uniform_(m.weight)
-    logging.info(f"| bias in Linear layer: {bias}")
+    logger.info(f"| bias in Linear layer: {bias}")
     if bias:
         nn.init.constant_(m.bias, 0.0)
     return m
@@ -64,9 +66,9 @@ class CTCDecoder(FairseqDecoder):
         self.dropout_module = FairseqDropout(cfg.dropout_rate)
         self.proj = Linear(cfg.embed_dim, len(dictionary), bias=True)
 
-        logging.info(f"| dictionary for CTC module: {len(dictionary)} types")
-        logging.info(f"| CTC-based compression: {cfg.ctc_compression}")
-        logging.info(f"| CTC-based compression type: {cfg.ctc_compression_type}")
+        logger.info(f"| dictionary for CTC module: {len(dictionary)} types")
+        logger.info(f"| CTC-based compression: {cfg.ctc_compression}")
+        logger.info(f"| CTC-based compression type: {cfg.ctc_compression_type}")
 
         if cfg.ctc_compression and cfg.post_compression_layer:
             self.post = nn.Sequential(
@@ -75,7 +77,7 @@ class CTCDecoder(FairseqDecoder):
                 nn.GELU(),
                 nn.Linear(4 * cfg.embed_dim, cfg.embed_dim),
             )
-            logging.info(f"| post-compression layer: True")
+            logger.info(f"| post-compression layer: True")
 
     def forward(self, speech_out):
         if (
@@ -108,7 +110,6 @@ class CTCDecoder(FairseqDecoder):
         elif self.cfg.pooling_fn == "max":
             return torch.max(x, dim=0)[0]
         elif self.cfg.pooling_fn == "attention":
-            # TODO
             raise NotImplementedError
 
     def compress_word(self, decoder_out, speech_out):
@@ -119,7 +120,7 @@ class CTCDecoder(FairseqDecoder):
             lprobs_ctc = F.log_softmax(decoder_out[0], dim=-1)  # T x B x V
             preds = torch.argmax(lprobs_ctc, dim=-1)  # T x B
 
-        T, B, D = x.size()
+        _, B, D = x.size()
         x = x.transpose(0, 1)  # B x T x D
         preds = preds.transpose(0, 1)  # B x T
 
@@ -128,13 +129,11 @@ class CTCDecoder(FairseqDecoder):
 
         t = valid_mask.sum(dim=-1).max().item()
         x_compr = torch.zeros(B, t, D, device=x.device, dtype=x.dtype)
-        # preds_compr = []
 
         for i in range(B):
-            # p = []
             if valid_mask[i].sum() == 0:
                 continue
-            x_i = x[i, valid_mask[i]]  # TODO chec if underlying memory is the same
+            x_i = x[i, valid_mask[i]]
             sep_indices = torch.nonzero(separetor_mask[i, valid_mask[i]]).squeeze()
             if sep_indices.dim() == 0:
                 x_compr[i, 0] = self.pool(x_i)
@@ -145,9 +144,7 @@ class CTCDecoder(FairseqDecoder):
                     if idx != prev_idx + 1:
                         x_compr[i, j] = self.pool(x_i[prev_idx + 1 : idx])
                         j += 1
-                        # p.append(preds[i, prev_idx+1:idx].tolist())
                     prev_idx = idx
-            # preds_compr.append(p)
 
         lengths_compr = (x_compr.sum(dim=-1) != self.blank_idx).sum(dim=-1)  # B
 
@@ -171,7 +168,7 @@ class CTCDecoder(FairseqDecoder):
         speech_out["modified_out_lengths"] = [lengths_compr]
 
         return decoder_out, speech_out
-
+    
     def compress_letter(self, decoder_out, speech_out):
         x = speech_out["encoder_out"][0].transpose(0, 1)  # T x B x D
         prev_lengths = speech_out["encoder_out_lengths"][0]
@@ -180,55 +177,36 @@ class CTCDecoder(FairseqDecoder):
             lprobs_ctc = F.log_softmax(decoder_out[0], dim=-1)  # T x B x V
             preds = torch.argmax(lprobs_ctc, dim=-1)  # T x B
 
-        T, B, D = x.size()
+        _, B, D = x.size()
         x = x.transpose(0, 1)
         preds = preds.transpose(0, 1)
 
-        x_compr = torch.zeros(B, T, D, device=x.device, dtype=x.dtype)
-        preds_after_merged = torch.zeros(B, T, dtype=torch.long, device=preds.device)
-
-        # breakpoint()
+        t = (preds != self.blank_idx).sum(dim=-1).max().item()
+        x_compr = torch.zeros(B, t, D, device=x.device, dtype=x.dtype)
+        lengths_compr = torch.zeros(B, device=x.device, dtype=torch.long)
 
         for i in range(B):
             p, c = preds[i].unique_consecutive(return_counts=True)
-
+            valid_mask_i = p != self.blank_idx
             x_splt = torch.split(x[i], c.tolist())
             out = torch.stack([t.mean(dim=0) for t in x_splt])
+            out = out[valid_mask_i]
+            x_compr[i, :out.size(0)] = out
+            lengths_compr[i] = out.size(0)
 
-            x_compr[i, : out.size(0)] = out
-            preds_after_merged[i, : p.size(0)] = p
-
-        mask = preds_after_merged == self.blank_idx
-        preds_after_merged.masked_fill_(mask, 0)
-        x_compr.masked_fill_(mask.unsqueeze(-1), 0)
-
-        # breakpoint()
-
-        # Get mask of elements which are blank
-        non_blank_mask = ~preds_after_merged.eq(self.blank_idx)
-        # Get new lengths
-        lengths = torch.sum(non_blank_mask, dim=-1)
-
-        x_compr = x_compr.masked_select(non_blank_mask.unsqueeze(-1)).view(-1, D)
-        x_compr = self._pad_seq_given_lens_arrays(x_compr, lengths)
-
-        # breakpoint()
-
+        max_length = lengths_compr.max().item()
+        x_compr = x_compr[:, :max_length]
+        
         if not x_compr.size(1):
-            logging.info(
+            logger.info(
                 "No frames left after CTC compression. Returning original output."
             )
             return decoder_out, speech_out
 
-        x_compr_mask = (
-            torch.arange(x_compr.size(1), device=x_compr.device).expand(
-                x_compr.size(0), -1
-            )
-            >= lengths.unsqueeze(1)
-        ).bool()
+        x_compr_mask = lengths_to_padding_mask(lengths_compr)
 
         decoder_out[-1]["compression_rate"] = (
-            prev_lengths.float() - lengths.float()
+            prev_lengths.float() - lengths_compr.float()
         ) / prev_lengths.float()
 
         if hasattr(self, "post"):
@@ -237,19 +215,6 @@ class CTCDecoder(FairseqDecoder):
         assert x_compr.size(0) == speech_out["encoder_out"][0].size(0)
         speech_out["modified_out"] = [x_compr]
         speech_out["modified_padding_mask"] = [x_compr_mask]
-        speech_out["modified_out_lengths"] = [lengths]
+        speech_out["modified_out_lengths"] = [lengths_compr]
 
         return decoder_out, speech_out
-
-    def _pad_seq_given_lens_arrays(self, input, lengths, padding_value=0.0):
-        max_len = max(lengths)
-        B = len(lengths)
-        D = input.size(-1)
-        padded = torch.full(
-            (B, max_len, D), padding_value, device=input.device, dtype=input.dtype
-        )
-        cum_len = 0
-        for i, val in enumerate(lengths):
-            padded[i, :val] = input[cum_len : cum_len + val]
-            cum_len += val
-        return padded
