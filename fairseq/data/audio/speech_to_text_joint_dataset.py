@@ -68,6 +68,10 @@ class S2TJointDataConfig(S2TDataConfig):
     @property
     def cached_encoder_representations(self):
         return self.config.get("cached_encoder_representations", None)
+    
+    @property
+    def cached_encoder_embeddings(self):
+        return self.config.get("cached_encoder_embeddings", None)
 
 
 class SpeechToTextJointDatasetItem(NamedTuple):
@@ -80,6 +84,7 @@ class SpeechToTextJointDatasetItem(NamedTuple):
     tgt_alignment: Optional[torch.Tensor] = None
     id: Optional[str] = None
     src_txt_repr: Optional[torch.Tensor] = None
+    src_txt_emb: Optional[torch.Tensor] = None
 
 
 # use_src_lang_id:
@@ -134,6 +139,9 @@ class SpeechToTextJointDataset(SpeechToTextDataset):
         self.alignment = None
         if cfg.cached_encoder_representations is not None:
             self.cached_encoder_representations = Path(cfg.cached_encoder_representations)
+        if cfg.cached_encoder_embeddings is not None:
+            self.cached_encoder_embeddings = Path(cfg.cached_encoder_embeddings)
+        self.load_src_text = src_texts is not None and src_dict is not None and not hasattr(self, "cached_encoder_representations")
         self.use_src_lang_id = use_src_lang_id
         if alignment is not None:
             self.alignment = [
@@ -149,7 +157,7 @@ class SpeechToTextJointDataset(SpeechToTextDataset):
         s2t_dataset_item = super().__getitem__(index)
         src_tokens = None
         src_lang_tag = None
-        if self.src_texts is not None and self.src_dict is not None:
+        if self.load_src_text:
             src_tokens = self.get_tokenized_src_text(index)
             src_tokens = self.src_dict.encode_line(
                 src_tokens, add_if_not_exist=False, append_eos=True
@@ -165,14 +173,18 @@ class SpeechToTextJointDataset(SpeechToTextDataset):
         ali = None
         if self.alignment is not None:
             ali = torch.Tensor(self.alignment[index]).float()
+
+        src_txt_repr, src_txt_emb = None, None
         if hasattr(self, "cached_encoder_representations"):
             src_txt_repr = torch.load(
                 self.cached_encoder_representations / f"{s2t_dataset_item.id}.pt",
                 map_location=torch.device("cpu")
             )
-            assert src_txt_repr.shape[0] == src_tokens.shape[0] + 1 # no lang tag yet
-        else:
-            src_txt_repr = None
+        if hasattr(self, "cached_encoder_embeddings"):
+            src_txt_emb = torch.load(
+                self.cached_encoder_embeddings / f"{s2t_dataset_item.id}_emb.pt",
+                map_location=torch.device("cpu")                
+            )
 
         return SpeechToTextJointDatasetItem(
             index=index,
@@ -183,19 +195,40 @@ class SpeechToTextJointDataset(SpeechToTextDataset):
             src_lang_tag=src_lang_tag,
             tgt_alignment=ali,
             id=s2t_dataset_item.id,
-            src_txt_repr=src_txt_repr
+            src_txt_repr=src_txt_repr,
+            src_txt_emb=src_txt_emb
         )
 
     def __len__(self):
         return self.n_samples
+    
+    def collate_cached(self, repr: List[torch.Tensor], emb: List[torch.Tensor], order):
+        repr = [repr[i] for i in order]
+        lengths = torch.tensor([r.size(0) for r in repr], dtype=torch.long)
+        max_len = lengths.max().item()
+        bs = len(repr)
+        dim = repr[0].size(1)
+        repr_collated = torch.zeros(bs, max_len, dim, dtype=repr[0].dtype, device=repr[0].device)
+        for i, r in enumerate(repr):
+            repr_collated[i, :r.size(0)] = r
+            
+        emb_collated = None
+        if emb[0] is not None:
+            emb = [emb[i] for i in order]
+            emb_collated = torch.zeros(bs, max_len, dim, dtype=emb[0].dtype, device=emb[0].device)
+            for i, e in enumerate(emb):
+                emb_collated[i, :e.size(0)] = e
 
+        return repr_collated, lengths, emb_collated
+        
+        
     def collater(self, samples: List[SpeechToTextJointDatasetItem]) -> Dict:
         s2t_out = super().collater(samples, return_order=True)
         if s2t_out == {}:
             return s2t_out
         net_input, order = s2t_out["net_input"], s2t_out["order"]
 
-        if self.src_texts is not None and self.src_dict is not None:
+        if self.load_src_text:
             src_txt_tokens = fairseq_data_utils.collate_tokens(
                 [x.src_txt_tokens for x in samples],
                 self.src_dict.pad(),
@@ -225,16 +258,17 @@ class SpeechToTextJointDataset(SpeechToTextDataset):
             src_txt_lengths = src_txt_lengths.index_select(0, order)
             net_input["src_txt_tokens"] = src_txt_tokens
             net_input["src_txt_lengths"] = src_txt_lengths
-            
-        if hasattr(self, "cached_encoder_representations"):
-            src_txt_repr = [x.src_txt_repr for x in samples]
-            lengths = torch.tensor([x.size(0) for x in src_txt_repr], dtype=torch.long)
-            src_txt_repr = torch.nn.utils.rnn.pad_sequence(src_txt_repr, batch_first=True)
-            src_txt_repr = src_txt_repr.index_select(0, order)
-            lengths = lengths.index_select(0, order)
-            net_input["src_txt_repr"] = src_txt_repr
-            net_input["src_txt_repr_lengths"] = lengths
 
+        if hasattr(self, "cached_encoder_representations"):
+            src_txt_repr, src_txt_lengths, src_txt_emb = self.collate_cached(
+                [x.src_txt_repr for x in samples],
+                [x.src_txt_emb for x in samples],
+                order
+            )
+            net_input["src_txt_repr"] = src_txt_repr
+            net_input["src_txt_lengths"] = src_txt_lengths
+            net_input["src_txt_emb"] = src_txt_emb
+        
         net_input["alignment"] = None
         if self.alignment is not None:
             max_len = max([s.tgt_alignment.size(0) for s in samples])
