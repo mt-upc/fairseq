@@ -56,6 +56,7 @@ from .length_adaptor import (
     ModalityAdapterConfig,
     ModalityAdapter,
 )
+from .ctc_decoder import CTCDecoder, CTCDecoderConfig
 
 __all__ = [
     "AdaptiveInput",
@@ -111,4 +112,6 @@ __all__ = [
     "Conv1dAdaptor",
     "ModalityAdapterConfig",
     "ModalityAdapter",
+    "CTCDecoder",
+    "CTCDecoderConfig"
 ]
