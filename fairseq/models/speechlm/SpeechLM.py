@@ -219,11 +219,12 @@ class SpeechLM(nn.Module):
         ### build unit2text decoder, not available for now
         self.add_decoder = cfg.add_decoder
 
-    def upgrade_state_dict_named(self, state_dict, name):
-        """Upgrade a (possibly old) state dict for new versions."""
+    # Commented out because it causes a bug when running fairseq-generate
+    # def upgrade_state_dict_named(self, state_dict, name):
+    #     """Upgrade a (possibly old) state dict for new versions."""
 
-        super().upgrade_state_dict_named(state_dict, name)
-        return state_dict
+    #     super().upgrade_state_dict_named(state_dict, name)
+    #     return state_dict
 
     def apply_mask(self, x, padding_mask, target_list):
         B, T, C = x.shape
