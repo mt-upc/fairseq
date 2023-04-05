@@ -25,7 +25,7 @@ class Conv1dAdaptorConfig(FairseqDataclass):
         metadata={"help": "# of output channels in the Conv1d Adaptor"}
     )
     mid_channels: int = field(
-        default=None,
+        default=1024,
         metadata={"help": "# of intermediate channels in the Conv1d Adaptor"}
     )
     num_layers: int = field(
@@ -78,7 +78,6 @@ class Conv1dAdaptor(nn.Module):
             )
             self.post_proj_ln = LayerNorm(cfg.out_channels)
 
-        cfg.mid_channels = cfg.out_channels if not cfg.mid_channels else cfg.mid_channels
         dim_factor = 2 if cfg.activation_fn == 'glu' else 1
         self.layers = nn.ModuleList(
             nn.Conv1d(
