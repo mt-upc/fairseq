@@ -1,9 +1,14 @@
-import contextlib
 import re
 import logging
 from dataclasses import dataclass, field
 from omegaconf import II, DictConfig, OmegaConf
 from typing import Any, Optional, Dict, List, Type
+
+# TODO: remove this once we have a better way to import from examples
+import sys
+import os
+sys.path.append(os.environ["FAIRSEQ_ROOT"])
+from examples.speech_text_siamese.models.siamese_st2t_transformer import TransformerEncoderLayers
 
 import torch
 import torch.nn as nn
@@ -45,6 +50,8 @@ from fairseq.modules.length_adaptor import (
     ModalityAdapterConfig,
     ModalityAdapter,
 )
+from fairseq.modules import CTCDecoderConfig, CTCDecoder
+from fairseq.models.transformer.transformer_config import TransformerConfig
 from fairseq.tasks import FairseqTask
 from fairseq.tasks.audio_pretraining import AudioPretrainingConfig
 from fairseq.tasks.hubert_pretraining import HubertPretrainingConfig
@@ -89,6 +96,14 @@ class CouplingConfig(FairseqDataclass):
     modality_adapter: Optional[ModalityAdapterConfig] = field(
         default=None,
         metadata={"help": "Modality Adapter configuration"},
+    )
+    context_encoder: Optional[TransformerConfig] = field(
+        default=None,
+        metadata={"help": "Context Encoder configuration"},
+    )
+    ctc_decoder: Optional[CTCDecoderConfig] = field(
+        default=None,
+        metadata={"help": "CTC Decoder configuration"},
     )
 
 
@@ -377,8 +392,31 @@ class S2TPretrainedEncoder(FairseqEncoder, S2TPretrainedComponent):
 
     def add_coupling_modules(self, cfg: CouplingConfig) -> None:
         self.coupling_modules = nn.ModuleList()
+        if cfg.ctc_decoder:
+            if hasattr(cfg.ctc_decoder, "path") and cfg.ctc_decoder.path != "":
+                logger.info(f"Loading CTCDecoder from: {cfg.ctc_decoder.path}")
+                ckpt = torch.load(cfg.ctc_decoder.path, map_location='cpu')
+                ckpt["cfg"].dropout_rate = cfg.ctc_decoder.dropout_rate
+                
+                ctc_dict = Dictionary.load(cfg.ctc_decoder.dictionary)
+                # correct the ctc dictionary
+                # TODO: make sure this is the same for HuBERT
+                ctc_dict.symbols[0], ctc_dict.symbols[1] = ctc_dict.symbols[1], ctc_dict.symbols[0]
+                ctc_dict.indices["<s>"], ctc_dict.indices["<pad>"] = 1, 0
+                ctc_dict.bos_index, ctc_dict.pad_index = 1, 0
+
+                ctc_decoder = CTCDecoder(ctc_dict, ckpt["cfg"])
+                ctc_decoder.load_state_dict(ckpt["model"])
+            else:
+                # TODO initialize from pretrained speech encoder (if fine-tuned)
+                ctc_decoder = CTCDecoder(cfg.ctc_decoder)
+            # freeze the ctc decoder projection since there is no CTC loss
+            # TODO: maybe also freeze post projection layer?
+            ctc_decoder.proj.requires_grad = False
+            self.coupling_modules.append(ctc_decoder)
         if cfg.conv1d_adaptor:
             if hasattr(cfg.conv1d_adaptor, "path") and cfg.conv1d_adaptor.path != "":
+                logger.info(f"Loading Conv1dAdaptor from: {cfg.conv1d_adaptor.path}")
                 ckpt = torch.load(cfg.conv1d_adaptor.path, map_location='cpu')
                 adaptor = Conv1dAdaptor(ckpt["cfg"])
                 adaptor.load_state_dict(ckpt["model"])
@@ -389,6 +427,19 @@ class S2TPretrainedEncoder(FairseqEncoder, S2TPretrainedComponent):
             self.coupling_modules.append(
                 ModalityAdapter(cfg.modality_adapter)
             )
+        if cfg.context_encoder:
+            if hasattr(cfg.context_encoder, "path") and cfg.context_encoder.path != "":
+                logger.info(f"Loading ContextEncoder from: {cfg.context_encoder.path}")
+                ckpt = torch.load(cfg.context_encoder.path, map_location='cpu')
+                ckpt["cfg"].dropout = cfg.context_encoder.dropout
+                ckpt["cfg"].attention_dropout = cfg.context_encoder.attention_dropout
+                ckpt["cfg"].activation_dropout = cfg.context_encoder.activation_dropout
+                context_encoder = TransformerEncoderLayers(ckpt["cfg"])
+                context_encoder.load_state_dict(ckpt["model"])
+            else:
+                # TODO initialize from pretrained encoder-decoder
+                context_encoder = TransformerEncoderLayers(cfg.context_encoder)
+            self.coupling_modules.append(context_encoder)
 
     def pre_forward(self, src_tokens, src_lengths, **kwargs):
         return {
@@ -400,13 +451,31 @@ class S2TPretrainedEncoder(FairseqEncoder, S2TPretrainedComponent):
     def forward(self, src_tokens, src_lengths, **kwargs):
         encoder_inputs = self.pre_forward(src_tokens, src_lengths, **kwargs)
         encoder_out = self.ORIGINAL_MODEL_CLS.forward(self, **encoder_inputs)
+        encoder_out["layer_results"] = None
         return self.post_forward(encoder_out)
 
     def post_forward(self, encoder_out):
         for i, (eo, epm) in enumerate(zip(encoder_out["encoder_out"], encoder_out["encoder_padding_mask"])):
             if safe_hasattr(self, 'coupling_modules'):
                 for module in self.coupling_modules:
-                    eo, epm = module(eo, epm)
+                    if isinstance(module, CTCDecoder):
+                        speech_out = {
+                            "encoder_out": [eo.transpose(0, 1)], # B x T x C
+                            "encoder_out_lengths": [
+                                epm.sum(dim=1) if epm is not None else 
+                                torch.ones(eo.size(1), dtype=torch.long, device=eo.device) * eo.size(0)
+                            ]
+                        }
+                        ctc_out = module(speech_out)  # T x B x V
+                        _, speech_out = module.compress(ctc_out, speech_out)
+                        eo = speech_out["modified_out"][0].transpose(0, 1) # T' x B x C
+                        epm = speech_out["modified_padding_mask"][0] # B x T'
+                    elif isinstance(module, Conv1dAdaptor) or isinstance(module, ModalityAdapter):
+                        eo, epm = module(eo, epm)
+                    elif isinstance(module, TransformerEncoderLayers):
+                        eo = module(eo, epm)
+                    else:
+                        raise NotImplementedError(f"Unknown coupling module: {module}")
             encoder_out["encoder_out"][i] = eo
             encoder_out["encoder_padding_mask"][i] = epm
         return encoder_out

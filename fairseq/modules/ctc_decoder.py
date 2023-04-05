@@ -47,6 +47,12 @@ class CTCDecoderConfig(FairseqDataclass):
             "help": "whether to use layer normalization before ctc projection layer"
         },
     )
+    path: str = field(
+        default="", metadata={"help": "path to the ctc model for inference"}
+    )
+    dictionary: str = field(
+        default="", metadata={"help": "path to the ctc model dictionary for inference"}
+    )
 
 
 class CTCDecoder(FairseqDecoder):
