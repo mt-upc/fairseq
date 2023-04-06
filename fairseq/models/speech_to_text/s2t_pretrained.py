@@ -7,7 +7,7 @@ from typing import Any, Optional, Dict, List, Type
 # TODO: remove this once we have a better way to import from examples
 import sys
 import os
-sys.path.append(os.environ["FAIRSEQ_ROOT"])
+sys.path.append(f"{os.environ['IWSLT_ROOT']}/fairseq")
 from examples.speech_text_siamese.models.siamese_st2t_transformer import TransformerEncoderLayers
 
 import torch
