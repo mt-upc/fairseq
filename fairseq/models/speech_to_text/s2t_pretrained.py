@@ -4,12 +4,6 @@ from dataclasses import dataclass, field
 from omegaconf import II, DictConfig, OmegaConf
 from typing import Any, Optional, Dict, List, Type
 
-# TODO: remove this once we have a better way to import from examples
-import sys
-import os
-sys.path.append(os.environ["FAIRSEQ_ROOT"])
-from examples.speech_text_siamese.models.siamese_st2t_transformer import TransformerEncoderLayers
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -50,7 +44,7 @@ from fairseq.modules.length_adaptor import (
     ModalityAdapterConfig,
     ModalityAdapter,
 )
-from fairseq.modules import CTCDecoderConfig, CTCDecoder
+from fairseq.modules import CTCDecoderConfig, CTCDecoder, TransformerEncoderLayers
 from fairseq.models.transformer.transformer_config import TransformerConfig
 from fairseq.tasks import FairseqTask
 from fairseq.tasks.audio_pretraining import AudioPretrainingConfig
