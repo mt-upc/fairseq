@@ -57,6 +57,8 @@ from .length_adaptor import (
     ModalityAdapter,
 )
 from .ctc_decoder import CTCDecoder, CTCDecoderConfig
+from .transformer_encoder_layers import TransformerEncoderLayers
+from .speech_embedder import Embedder, EmbedderConfig
 
 __all__ = [
     "AdaptiveInput",
@@ -113,5 +115,8 @@ __all__ = [
     "ModalityAdapterConfig",
     "ModalityAdapter",
     "CTCDecoder",
-    "CTCDecoderConfig"
+    "CTCDecoderConfig",
+    "TransformerEncoderLayers",
+    "Embedder",
+    "EmbedderConfig",
 ]
