@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 
 import logging
-from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -23,10 +22,12 @@ from fairseq.modules import (
     CTCDecoderConfig,
     Conv1dAdaptor,
     Conv1dAdaptorConfig,
-    LayerNorm
+    TransformerEncoderLayers,
+    Embedder,
+    EmbedderConfig
 )
 from fairseq.models.transformer.transformer_config import TransformerConfig
-from fairseq.modules.transformer_layer import TransformerEncoderLayerBase
+
 from omegaconf import OmegaConf
 
 logger = logging.getLogger(__name__)
@@ -37,34 +38,6 @@ class DummyDecoder(FairseqDecoder):
         super().__init__(dictionary)
 
 
-def build_embedding(dictionary, embed_dim):
-    num_embeddings = len(dictionary)
-    padding_idx = dictionary.pad()
-    return Embedding(num_embeddings, embed_dim, padding_idx)
-
-
-class TransformerEncoderLayers(nn.Module):
-    def __init__(self, cfg: TransformerConfig):
-        super().__init__()
-
-        self.cfg = cfg
-        self.layers = nn.ModuleList(
-            [TransformerEncoderLayerBase(cfg) for _ in range(cfg.encoder.layers)]
-        )
-        self.normalize_before = cfg.encoder.normalize_before
-        self.layer_norm = LayerNorm(cfg.encoder.embed_dim)
-
-    def forward(self, x, padding_mask: Optional[torch.Tensor]):
-        
-        if not self.normalize_before:
-            x = self.layer_norm(x)
-        for layer in self.layers:
-            x = layer(x, padding_mask)
-        if self.normalize_before:
-            x = self.layer_norm(x)
-        return x
-
-
 class SiameseSpeechTextEncoders(FairseqEncoder):
     def __init__(
         self,
@@ -73,9 +46,8 @@ class SiameseSpeechTextEncoders(FairseqEncoder):
         dictionary,
         text_encoder=None,
         adaptor=None,
+        embedder=None,
         context_encoder=None,
-        bos_embedding=None,
-        eos_embedding=None,
     ):
         super().__init__(dictionary)
 
@@ -86,12 +58,10 @@ class SiameseSpeechTextEncoders(FairseqEncoder):
             self.text_encoder = text_encoder
         if adaptor is not None:
             self.adaptor = adaptor
+        if embedder is not None:
+            self.embedder = embedder
         if context_encoder is not None:
             self.context_encoder = context_encoder
-        if bos_embedding is not None:
-            self.bos_embedding = bos_embedding
-        if eos_embedding is not None:
-            self.eos_embedding = eos_embedding
 
         self.ctc_layer_id = args.w2v_ctc_layer_id
         self.freeze_text_encoder = args.freeze_text_encoder
@@ -161,7 +131,9 @@ class SiameseSpeechTextEncoders(FairseqEncoder):
         else:
             model_args = ckpt["args"]
         
-        enc_emb = build_embedding(src_dictionary, model_args.encoder_embed_dim)
+        enc_emb = Embedding(
+            len(src_dictionary), model_args.encoder_embed_dim, src_dictionary.pad()
+        )
         
         if not args.retain_dropout_in_frozen_text_encoder:
             model_args.dropout = 0.0
@@ -225,6 +197,7 @@ class SiameseSpeechTextEncoders(FairseqEncoder):
         adaptor_cfg.num_layers = args.conv1d_adaptor_layers
         adaptor_cfg.kernel_size = args.conv1d_adaptor_kernel_size
         adaptor_cfg.stride = args.conv1d_adaptor_stride
+        adaptor_cfg.final_layer_norm = True
         
         adaptor = Conv1dAdaptor(adaptor_cfg)
         
@@ -233,31 +206,39 @@ class SiameseSpeechTextEncoders(FairseqEncoder):
         return adaptor
     
     @classmethod
-    def build_special_embeddings(cls, args, spch_encoder, text_encoder, requires_grad=False):
-        eos_idx, bos_idx = 2, -49
+    def build_embedder(cls, args, spch_encoder, text_encoder):
         eos_token, bos_token = "</s>", "<lang:en>"
-        bos_emb, eos_emb = None, None
         
-        if not args.only_ctc and args.use_bos_embedding:
-            if text_encoder is not None:
-                assert text_encoder.dictionary.symbols[bos_idx] == bos_token
-                weights = text_encoder.embed_tokens.weight[bos_idx].data
-                logger.info(f"Using BOS embedding from text encoder: {bos_token} with requires_grad={requires_grad}")
-            else:
-                weights = torch.zeros(spch_encoder.embed_dim)
-            bos_emb = nn.Parameter(weights, requires_grad=requires_grad)
-            
-        if not args.only_ctc and args.use_eos_embedding:
-            if text_encoder is not None:
-                assert text_encoder.dictionary.symbols[eos_idx] == eos_token
-                weights = text_encoder.embed_tokens.weight[eos_idx].data
-                logger.info(f"Using EOS embedding from text encoder: {eos_token} with requires_grad={requires_grad}")
-            else:
-                weights = torch.zeros(spch_encoder.embed_dim)
-            eos_emb = nn.Parameter(weights, requires_grad=requires_grad)
-
-        return bos_emb, eos_emb
-
+        if args.only_ctc:
+            return None
+        if not args.use_special_embedding and not args.use_positional_embedding:
+            return None
+        
+        embedder_cfg = EmbedderConfig()
+        embedder_cfg.use_special_embedding = args.use_special_embedding
+        embedder_cfg.use_positional_embedding = args.use_positional_embedding
+        embedder_cfg.embed_dim = spch_encoder.embed_dim
+        embedder = Embedder(embedder_cfg)
+        
+        if text_encoder is not None:
+            if args.use_special_embedding:
+                bos_idx = text_encoder.dictionary.symbols.index(bos_token)
+                weights_bos = text_encoder.embed_tokens.weight[bos_idx].data
+                embedder.bos_emb = nn.Parameter(weights_bos)
+                
+                eos_idx = text_encoder.dictionary.symbols.index(eos_token)
+                weights_eos = text_encoder.embed_tokens.weight[eos_idx].data
+                embedder.eos_emb = nn.Parameter(weights_eos)
+                logger.info("Loaded special embeddings for BOS and EOS from text encoder")
+            if args.use_positional_embedding:
+                embedder.pos_emb.load_state_dict(text_encoder.embed_positions.state_dict())
+                embedder.layernorm.load_state_dict(text_encoder.layernorm_embedding.state_dict())
+                logger.info("Loaded positional embedding and layernorm embedding from text encoder")
+        
+        args.embedder_args = embedder_cfg
+        
+        return embedder
+    
     def forward(self, src_tokens, src_lengths, src_txt_tokens, src_txt_lengths):
         raise NotImplementedError("Please use the forward submethods from the main model")
     
@@ -284,6 +265,8 @@ class SiameseSpeechTextEncoders(FairseqEncoder):
             output_lengths = (torch.ones(B, device=x.device) * T).long()
         
         assert x.size(0) == speech_out[f"{key}_out"][0].size(0)
+        if padding_mask is not None:
+            assert padding_mask.size(0) == speech_out[f"{key}_out"][0].size(0)
         speech_out["modified_out"] = [x]
         speech_out["modified_padding_mask"] = [padding_mask]
         speech_out["modified_out_lengths"] = [output_lengths]
@@ -300,7 +283,7 @@ class SiameseSpeechTextEncoders(FairseqEncoder):
         }
         
         res = self.spch_encoder.w2v_model.extract_features(**w2v_args)
-        
+
         padding_mask = res["padding_mask"]
         if padding_mask is not None:
             output_lengths = (1 - padding_mask.int()).sum(dim=1)
@@ -309,7 +292,7 @@ class SiameseSpeechTextEncoders(FairseqEncoder):
             output_lengths = (torch.ones(B, device=res["x"].device) * T).long()
             
         return {
-            "encoder_out": [res["x"]],  # T x B x C
+            "encoder_out": [res["x"]],  # B x T x C
             "encoder_padding_mask": [padding_mask], # B x T
             "encoder_embedding": [],  # B x T x C
             "encoder_states": [],  # List[T x B x C]
@@ -328,18 +311,47 @@ class SiameseSpeechTextEncoders(FairseqEncoder):
         else:
             key = "encoder"
         
-        x = speech_out[f"{key}_out"][0]
+        x = speech_out[f"{key}_out"][0].transpose(0, 1)
         if speech_out[f"{key}_padding_mask"][0] is not None:
-            padding_mask = speech_out[f"{key}_padding_mask"][0].transpose(0, 1)
+            padding_mask = speech_out[f"{key}_padding_mask"][0]
         else:
             padding_mask = None
-        
+
         x = self.context_encoder(x, padding_mask)
-        
+        x = x.transpose(0, 1)
+
         assert x.size(0) == speech_out[f"{key}_out"][0].size(0)
+        if padding_mask is not None:
+            assert padding_mask.size(0) == speech_out[f"{key}_out"][0].size(0)
         speech_out["context_out"] = [x]
         speech_out["context_out_lengths"] = speech_out[f"{key}_out_lengths"]
         speech_out["context_padding_mask"] = speech_out[f"{key}_padding_mask"]
+        
+        return speech_out
+    
+    def forward_embedder(self, speech_out):
+        
+        if "modified_out" in speech_out:
+            key = "modified"
+        else:
+            key = "encoder"
+        
+        x = speech_out[f"{key}_out"][0]
+        lengths = speech_out[f"{key}_out_lengths"][0]
+        if speech_out[f"{key}_padding_mask"][0] is not None:
+            padding_mask = speech_out[f"{key}_padding_mask"][0]
+        else:
+            padding_mask = None
+        assert x.size(0) == lengths.size(0)
+        
+        x, padding_mask, lengths = self.embedder(x, padding_mask, lengths)
+        
+        assert x.size(0) == speech_out[f"{key}_out"][0].size(0)
+        if padding_mask is not None:
+            assert padding_mask.size(0) == speech_out[f"{key}_out"][0].size(0)
+        speech_out["modified_out"] = [x]
+        speech_out["modified_out_lengths"] = [lengths]
+        speech_out["modified_padding_mask"] = [padding_mask]
         
         return speech_out
     
@@ -347,41 +359,6 @@ class SiameseSpeechTextEncoders(FairseqEncoder):
         if not hasattr(self, "text_encoder"):
             return None
         return self.text_encoder(src_txt_tokens, src_txt_lengths)
-    
-    def apply_special_embeddings(self, speech_out):
-        if not hasattr(self, "bos_emb") and not hasattr(self, "eos_emb"):
-            return speech_out
-        
-        if "modified_out" in speech_out:
-            key = "modified"
-        else:
-            key = "encoder"
-            
-        x = speech_out[f"{key}_out"][0]
-        lengths = speech_out[f"{key}_out_lengths"][0]
-        if speech_out[f"{key}_padding_mask"][0] is not None:
-            padding_mask = speech_out[f"{key}_padding_mask"][0].transpose(0, 1)
-        else:
-            padding_mask = None
-        assert x.size(1) == lengths.size(0)
-        B = x.size(1)
-        
-        if hasattr(self, "bos_emb"):
-            x = torch.cat([self.bos_emb.unsqueeze(0).expand(1, B, -1), x], dim=1)
-            lengths += 1
-        if hasattr(self, "eos_emb"):
-            x = torch.cat([x, self.eos_emb.unsqueeze(0).expand(1, B, -1)], dim=1)
-            lengths += 1
-    
-        if padding_mask is not None:
-            padding_mask = lengths_to_padding_mask(lengths)
-        
-        assert x.size(0) == speech_out[f"{key}_out"][0].size(0)
-        speech_out["modified_out"] = [x]
-        speech_out["modified_out_lengths"] = [lengths]
-        speech_out["modified_padding_mask"] = [padding_mask]
-        
-        return speech_out
     
     def _maybe_freeze_text_encoder(self):
         if hasattr(self, "text_encoder") and self.freeze_text_encoder:
@@ -527,12 +504,12 @@ class SiameseST2TTransformerModel(FairseqEncoderDecoderModel):
             help="do not use text encoder (no OT), use only speech encoder"
         )
         parser.add_argument(
-            "--use-bos-embedding", type=str, default="false",
-            help="use bos embedding in the output of the speech encoder"
+            "--use-special-embedding", type=str, default="false",
+            help="use bos and eos embedding in the output of the speech encoder"
         )
         parser.add_argument(
-            "--use-eos-embedding", type=str, default="false",
-            help="use eos embedding in the output of the speech encoder"
+            "--use-positional-embedding", type=str, default="false",
+            help="use positional embedding in the output of the speech encoder"
         )
         parser.add_argument(
             "--ctc-compression-type", type=str, default="letter", choices=["letter", "word"],
@@ -546,6 +523,10 @@ class SiameseST2TTransformerModel(FairseqEncoderDecoderModel):
             "--ctc-compression-pooling-fn", type=str, default="mean", choices=["mean", "max", "attention"],
             help="pooling function to use for CTC compression"
         )
+        parser.add_argument(
+            "--ctc-post-compression-dim", type=int, default=4096,
+            help="dimension of the linear layer after CTC compression"
+        )
         
     @classmethod
     def build_encoder(cls, args, task):
@@ -553,7 +534,7 @@ class SiameseST2TTransformerModel(FairseqEncoderDecoderModel):
         text_encoder = SiameseSpeechTextEncoders.build_text_encoder(args, task.src_dict)
         adaptor = SiameseSpeechTextEncoders.build_adaptor(args, spch_encoder)
         context_encoder = SiameseSpeechTextEncoders.build_context_encoder(args, text_encoder)
-        bos_emb, eos_emb = SiameseSpeechTextEncoders.build_special_embeddings(args, spch_encoder, text_encoder)
+        embedder = SiameseSpeechTextEncoders.build_embedder(args, spch_encoder, text_encoder)
         
         encoder = SiameseSpeechTextEncoders(
             args,
@@ -562,8 +543,7 @@ class SiameseST2TTransformerModel(FairseqEncoderDecoderModel):
             text_encoder=text_encoder if not args.no_text_encoder else None,
             adaptor=adaptor,
             context_encoder=context_encoder,
-            bos_embedding=bos_emb,
-            eos_embedding=eos_emb,
+            embedder=embedder
         )
         
         return encoder
@@ -580,8 +560,10 @@ class SiameseST2TTransformerModel(FairseqEncoderDecoderModel):
         ctc_decoder_cfg.ctc_compression = args.ctc_compression
         ctc_decoder_cfg.ctc_compression_type = args.ctc_compression_type
         ctc_decoder_cfg.post_compression_layer = args.ctc_post_compression_layer
+        ctc_decoder_cfg.post_compression_dim = args.ctc_post_compression_dim
         ctc_decoder_cfg.pooling_fn = args.ctc_compression_pooling_fn
         ctc_decoder_cfg.layernorm = args.w2v_ctc_layer_id != -1
+        ctc_decoder_cfg.final_layernorm = True
         
         decoder = CTCDecoder(task.target_dictionary, ctc_decoder_cfg)
         # initialized the decoder's projection layer with the encoder's ctc projection layer
@@ -599,6 +581,7 @@ class SiameseST2TTransformerModel(FairseqEncoderDecoderModel):
         args.w2v_ctc_layer_id = getattr(args, "w2v_ctc_layer_id", -1)
         args.conv1d_adaptor_layers = getattr(args, "conv1d_adaptor_layers", 0)
         args.freeze_speech_encoder_layers = getattr(args, "freeze_speech_encoder_layers", -1)
+        args.ctc_post_compression_dim = getattr(args, "ctc_post_compression_dim", 4096)
         args.ctc_compression_type = getattr(args, "ctc_compression_type", "letter")
         args.ctc_compression_pooling_fn = getattr(args, "ctc_compression_pooling_fn", "mean")
         args.freeze_text_encoder = default_bool("freeze_text_encoder")
@@ -608,8 +591,8 @@ class SiameseST2TTransformerModel(FairseqEncoderDecoderModel):
         args.w2v_apply_mask = default_bool("w2v_apply_mask")
         args.retain_dropout_in_frozen_speech_encoder = default_bool("retain_dropout_in_frozen_speech_encoder")
         args.no_text_encoder = default_bool("no_text_encoder")
-        args.use_bos_embedding = default_bool("use_bos_embedding")
-        args.use_eos_embedding = default_bool("use_eos_embedding")
+        args.use_special_embedding = default_bool("use_special_embedding")
+        args.use_positional_embedding = default_bool("use_positional_embedding")
         args.ctc_post_compression_layer = default_bool("ctc_post_compression_layer")
         args.only_ctc = not args.ot_weight and not args.ot_emb_weight
         
@@ -655,18 +638,18 @@ class SiameseST2TTransformerModel(FairseqEncoderDecoderModel):
 
     def forward(self, src_tokens, src_lengths, src_txt_tokens=None, src_txt_lengths=None):
         speech_out = self.encoder.forward_speech(src_tokens, src_lengths)
-        
+
         decoder_out = None
         if isinstance(self.decoder, CTCDecoder):
             decoder_out = self.decoder(speech_out)
 
             if self.decoder.cfg.ctc_compression:
                 decoder_out, speech_out = self.decoder.compress(decoder_out, speech_out)
-                
-        speech_out = self.encoder.apply_special_embeddings(speech_out)
-        
+                        
         speech_out = self.encoder.forward_adaptor(speech_out)
         
+        speech_out = self.encoder.forward_embedder(speech_out)
+
         if self.encoder.args.ot_weight > 0.0:
             speech_out = self.encoder.forward_context(speech_out)
         
