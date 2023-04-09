@@ -38,6 +38,9 @@ class CTCDecoderConfig(FairseqDataclass):
     post_compression_layer: bool = field(
         default=False, metadata={"help": "whether to use post-compression layer"}
     )
+    post_compression_dim: int = field(
+        default=4096, metadata={"help": "post-compression layer dimension"}
+    )
     pooling_fn: str = field(
         default="mean", metadata={"help": "pooling function: max, mean, attention"}
     )
@@ -52,6 +55,9 @@ class CTCDecoderConfig(FairseqDataclass):
     )
     dictionary: str = field(
         default="", metadata={"help": "path to the ctc model dictionary for inference"}
+    )
+    final_layernorm: bool = field(
+        default=False, metadata={"help": "whether to use final layer normalization"}
     )
 
 
@@ -79,11 +85,13 @@ class CTCDecoder(FairseqDecoder):
         if cfg.ctc_compression and cfg.post_compression_layer:
             self.post = nn.Sequential(
                 LayerNorm(cfg.embed_dim),
-                nn.Linear(cfg.embed_dim, 4 * cfg.embed_dim),
+                nn.Linear(cfg.embed_dim,  cfg.post_compression_dim),
                 nn.GELU(),
-                nn.Linear(4 * cfg.embed_dim, cfg.embed_dim),
+                nn.Linear(cfg.post_compression_dim, cfg.embed_dim),
             )
-            logger.info(f"| post-compression layer: True")
+            logger.info(f"| post-compression layer: True with dim {cfg.post_compression_dim}")
+        if cfg.ctc_compression and cfg.final_layernorm:
+            self.final_layernorm = LayerNorm(cfg.embed_dim)
 
     def forward(self, speech_out):
         if (
@@ -163,6 +171,9 @@ class CTCDecoder(FairseqDecoder):
 
         if hasattr(self, "post"):
             x_compr = self.post(x_compr)
+                
+        if hasattr(self, "final_layernorm"):
+            x_compr = self.final_layernorm(x_compr)
 
         decoder_out[-1]["compression_rate"] = (
             prev_lengths.float() - lengths_compr.float()
@@ -211,12 +222,15 @@ class CTCDecoder(FairseqDecoder):
 
         x_compr_mask = lengths_to_padding_mask(lengths_compr)
 
+        if hasattr(self, "post"):
+            x_compr = self.post(x_compr)
+                
+        if hasattr(self, "final_layernorm"):
+            x_compr = self.final_layernorm(x_compr)
+            
         decoder_out[-1]["compression_rate"] = (
             prev_lengths.float() - lengths_compr.float()
         ) / prev_lengths.float()
-
-        if hasattr(self, "post"):
-            x_compr = self.post(x_compr)
 
         assert x_compr.size(0) == speech_out["encoder_out"][0].size(0)
         speech_out["modified_out"] = [x_compr]
