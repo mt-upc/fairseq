@@ -59,6 +59,9 @@ class Conv1dAdaptorConfig(FairseqDataclass):
     path: str = field(
         default="", metadata={"help": "path to the pretrained adaptor model"}
     )
+    final_layer_norm: bool = field(
+        default=False, metadata={"help": "whether to apply final layer norm"}
+    )
 
 
 class Conv1dAdaptor(nn.Module):
@@ -95,6 +98,7 @@ class Conv1dAdaptor(nn.Module):
         self.stride = cfg.stride
         self.layerdrop = cfg.layerdrop
         self.layernorm = LayerNorm(cfg.in_channels) if cfg.layernorm else None
+        self.final_layer_norm = LayerNorm(cfg.out_channels) if cfg.final_layer_norm else None
 
     def forward(self, x, padding_mask: Optional[torch.Tensor]):
         if self.layernorm is not None:
@@ -125,7 +129,10 @@ class Conv1dAdaptor(nn.Module):
         if self.post_proj is not None:
             x = x + 0.5 * self.post_proj(x)
             x = self.post_proj_ln(x)
-
+            
+        if self.final_layer_norm is not None:
+            x = self.final_layer_norm(x)
+            
         out_padding_mask = None
         if padding_mask is not None:
             out_padding_mask = lengths_to_padding_mask(out_lens.long())
