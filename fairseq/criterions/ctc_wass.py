@@ -42,10 +42,6 @@ class CtcWassersteinCriterionConfig(CtcCriterionConfig):
         default=0.0,
         metadata={"help": "Weight for OT loss between the text embedding and output of the speech encoder"},
     )
-    norm_before_ot: bool = field(
-        default=False,
-        metadata={"help": "Normalize before computing OT"},
-    )
     ot_loss: SAMPLE_LOSS_CHOICES = field(
         default="sinkhorn",
         metadata={"help": "type of distance measure between X_i and Y_j"},
@@ -87,7 +83,6 @@ class CtcWassersteinCriterion(CtcCriterion):
         self.ot_weight = cfg.ot_weight
         self.ot_emb_weight = cfg.ot_emb_weight
 
-        self.norm_before_ot = cfg.norm_before_ot
         self.ot_loss = cfg.ot_loss
         self.ot_p = cfg.ot_p
         self.ot_blur = cfg.ot_blur
@@ -348,10 +343,6 @@ class CtcWassersteinCriterion(CtcCriterion):
         text_out = text_out[:, valid_idx, :]
         non_padding_text = non_padding_text[valid_idx, :]
         text_lens = text_lens[valid_idx]
-        
-        if self.norm_before_ot:
-            speech_out = speech_out / torch.linalg.norm(speech_out, dim=-1, keepdim=True)
-            text_out = text_out / torch.linalg.norm(text_out, dim=-1, keepdim=True)
             
         if self.ot_positional_weight > 0.0:
             # create tensor in which the elements are range of lengths
@@ -367,7 +358,7 @@ class CtcWassersteinCriterion(CtcCriterion):
             text_pos = self.ot_positional_weight * text_pos / (text_lens - 1).unsqueeze(0) # T x B
             speech_out = torch.cat((speech_out, speech_pos.unsqueeze(-1)), dim=-1)
             text_out = torch.cat((text_out, text_pos.unsqueeze(-1)), dim=-1)
-            
+
         speech_weights = (
             torch.ones_like(non_padding_speech) / 
             torch.sum(non_padding_speech, dim=-1).unsqueeze(-1) *
