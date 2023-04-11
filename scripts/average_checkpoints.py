@@ -12,6 +12,10 @@ import re
 import torch
 from fairseq.file_io import PathManager
 
+import sys
+sys.path.append('/home/usuaris/veu/ioannis.tsiamas/repos/fairseq-internal-pm4st/examples/')
+from speech_text_siamese.models.siamese_st2t_transformer import SiameseST2TTransformerModel
+
 
 def average_checkpoints(inputs):
     """Loads checkpoints from inputs and returns a model with averaged weights.
