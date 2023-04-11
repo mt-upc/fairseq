@@ -124,10 +124,13 @@ class CtcWassersteinCriterion(CtcCriterion):
         extra = {"ctc_loss": 0.0, "wass_loss": 0.0, "wass_emb_loss": 0.0}
 
         if self.ctc_weight > 0.0:
-            ctc_loss, extra = self.compute_ctc_loss(
-                model, net_output, encoder_out, sample["target"], extra
-            )
-            loss += self.ctc_weight * ctc_loss
+            try:
+                ctc_loss, extra = self.compute_ctc_loss(
+                    model, net_output, encoder_out, sample["target"], extra
+                )
+                loss += self.ctc_weight * ctc_loss
+            except RuntimeError as e:
+                logging.error(f"RuntimeError: {e}")
 
         if self.ot_weight > 0.0:
             wass_loss = self.compute_wass_loss(self.ot_loss, encoder_out, net_input)
@@ -169,7 +172,7 @@ class CtcWassersteinCriterion(CtcCriterion):
                 net_output[-1]["compression_rate"].data.sum()
             )
 
-        if not model.training and self.ctc_weight > 0.0:
+        if not model.training and extra["ctc_loss"] != 0.0:
             logging_output = self.compute_wer(
                 extra["lprobs_ctc"],
                 sample,
