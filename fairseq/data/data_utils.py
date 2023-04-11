@@ -545,6 +545,15 @@ def lengths_to_padding_mask(lens):
     mask = mask.expand(bsz, -1) >= lens.view(bsz, 1).expand(-1, max_lens)
     return mask
 
+# x: torch.FloatTensor [T, B, D]
+# mask: torch.BoolTensor [B, T]
+# returns: torch.LongTensor [B]
+def get_lengths(x, mask=None):
+    if mask is not None:
+        return (~mask).long().sum(dim=1)
+    else:
+        return torch.LongTensor([x.size(0)] * x.size(1)).to(x.device)
+
 
 # lens: torch.LongTensor
 # returns: torch.BoolTensor
