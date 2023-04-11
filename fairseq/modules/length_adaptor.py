@@ -57,7 +57,7 @@ class Conv1dAdaptorConfig(FairseqDataclass):
         metadata={"help": "activation function"}
     )
     path: str = field(
-        default="", metadata={"help": "path to the pretrained adaptor model"}
+        default="", metadata={"help": "path to pre-trained Conv1d Adaptor checkpoint"}
     )
     final_layer_norm: bool = field(
         default=False, metadata={"help": "whether to apply final layer norm"}

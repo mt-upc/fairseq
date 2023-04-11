@@ -3,7 +3,7 @@ from dataclasses import dataclass, field
 import torch
 from torch import nn
 
-from fairseq.data.data_utils import lengths_to_padding_mask
+from fairseq.data.data_utils import lengths_to_padding_mask, get_lengths
 from fairseq.dataclass import FairseqDataclass
 from fairseq.modules import LayerNorm, PositionalEmbedding
 
@@ -25,6 +25,9 @@ class EmbedderConfig(FairseqDataclass):
     padding_idx: int = field(
         default=1, metadata={"help": "padding index"}
     )
+    path: str = field(
+        default="", metadata={"help": "path for pre-trained embedder checkpoint"}
+    )
 
 
 class Embedder(nn.Module):
@@ -44,22 +47,19 @@ class Embedder(nn.Module):
             )
             self.layernorm = LayerNorm(cfg.embed_dim)
             
-    def forward(self, x, padding_mask, lengths):
+    def forward(self, x, padding_mask=None):
         """Add special embedding and positional embedding.
         Args:
             x (FloatTensor): (B, T, C)
             padding_mask (ByteTensor): (B, T)
-            lengths (LongTensor): (B)
         Outputs:
             x (FloatTensor): (B, T+2, C)
             padding_mask (ByteTensor): (B, T+2)
-            lengths (LongTensor): (B)
         """
         
         B = x.size(0)
+        lengths = get_lengths(x.transpose(0, 1), padding_mask)
         assert B == len(lengths)
-        if padding_mask is not None:
-            assert B == padding_mask.size(0)
         
         if self.cfg.use_special_embedding:
             x = torch.cat([self.bos_emb.view(1, 1, -1).expand(B, 1, -1), x], dim=1)

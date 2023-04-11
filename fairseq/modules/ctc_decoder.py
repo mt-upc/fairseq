@@ -51,7 +51,7 @@ class CTCDecoderConfig(FairseqDataclass):
         },
     )
     path: str = field(
-        default="", metadata={"help": "path to the ctc model for inference"}
+        default="", metadata={"help": "path to pre-trained ctc decoder checkpoint"}
     )
     dictionary: str = field(
         default="", metadata={"help": "path to the ctc model dictionary for inference"}
