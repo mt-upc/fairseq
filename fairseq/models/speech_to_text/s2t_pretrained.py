@@ -9,7 +9,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from fairseq.data import Dictionary
-from fairseq.data.data_utils import lengths_to_padding_mask
+from fairseq.data.data_utils import lengths_to_padding_mask, get_lengths
 from fairseq.dataclass import FairseqDataclass
 from fairseq.dataclass.utils import (
     merge_with_parent,
@@ -44,7 +44,7 @@ from fairseq.modules.length_adaptor import (
     ModalityAdapterConfig,
     ModalityAdapter,
 )
-from fairseq.modules import CTCDecoderConfig, CTCDecoder, TransformerEncoderLayers
+from fairseq.modules import CTCDecoderConfig, CTCDecoder, TransformerEncoderLayers, EmbedderConfig, Embedder
 from fairseq.models.transformer.transformer_config import TransformerConfig
 from fairseq.tasks import FairseqTask
 from fairseq.tasks.audio_pretraining import AudioPretrainingConfig
@@ -98,6 +98,10 @@ class CouplingConfig(FairseqDataclass):
     ctc_decoder: Optional[CTCDecoderConfig] = field(
         default=None,
         metadata={"help": "CTC Decoder configuration"},
+    )
+    embedder: Optional[EmbedderConfig] = field(
+        default=None,
+        metadata={"help": "Speech Embedder configuration"},
     )
 
 
@@ -421,6 +425,16 @@ class S2TPretrainedEncoder(FairseqEncoder, S2TPretrainedComponent):
             self.coupling_modules.append(
                 ModalityAdapter(cfg.modality_adapter)
             )
+        if cfg.embedder:
+            if hasattr(cfg.embedder, "path") and cfg.embedder.path != "":
+                logger.info(f"Loading Speech Embedder from: {cfg.embedder.path}")
+                ckpt = torch.load(cfg.embedder.path, map_location='cpu')
+                embedder = Embedder(ckpt["cfg"])
+                embedder.load_state_dict(ckpt["model"])
+            else:
+                # TODO initialize from pretrained encoder-decoder
+                embedder = Embedder(cfg.embedder)
+            self.coupling_modules.append(embedder)
         if cfg.context_encoder:
             if hasattr(cfg.context_encoder, "path") and cfg.context_encoder.path != "":
                 logger.info(f"Loading ContextEncoder from: {cfg.context_encoder.path}")
@@ -455,19 +469,21 @@ class S2TPretrainedEncoder(FairseqEncoder, S2TPretrainedComponent):
                     if isinstance(module, CTCDecoder):
                         speech_out = {
                             "encoder_out": [eo.transpose(0, 1)], # B x T x C
-                            "encoder_out_lengths": [
-                                epm.sum(dim=1) if epm is not None else 
-                                torch.ones(eo.size(1), dtype=torch.long, device=eo.device) * eo.size(0)
-                            ]
+                            "encoder_out_lengths": [get_lengths(eo, epm)] # B
                         }
                         ctc_out = module(speech_out)  # T x B x V
                         _, speech_out = module.compress(ctc_out, speech_out)
-                        eo = speech_out["modified_out"][0].transpose(0, 1) # T' x B x C
-                        epm = speech_out["modified_padding_mask"][0] # B x T'
+                        if "modified_out" in speech_out:
+                            eo = speech_out["modified_out"][0].transpose(0, 1) # T' x B x C
+                            epm = speech_out["modified_padding_mask"][0] # B x T'
                     elif isinstance(module, Conv1dAdaptor) or isinstance(module, ModalityAdapter):
-                        eo, epm = module(eo, epm)
+                        eo, epm = module(eo, epm) # T/n x B x C
+                    elif isinstance(module, Embedder):
+                        eo = eo.transpose(0, 1) # B x T x C
+                        eo, epm, _ = module(eo, epm) # B x T+2 x C
+                        eo = eo.transpose(0, 1) # T+2 x B x C
                     elif isinstance(module, TransformerEncoderLayers):
-                        eo = module(eo, epm)
+                        eo = module(eo, epm) # T x B x C
                     else:
                         raise NotImplementedError(f"Unknown coupling module: {module}")
             encoder_out["encoder_out"][i] = eo
