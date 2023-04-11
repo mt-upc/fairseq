@@ -344,7 +344,7 @@ class SiameseSpeechTextEncoders(FairseqEncoder):
             padding_mask = None
         assert x.size(0) == lengths.size(0)
         
-        x, padding_mask, lengths = self.embedder(x, padding_mask, lengths)
+        x, padding_mask, lengths = self.embedder(x, padding_mask)
         
         assert x.size(0) == speech_out[f"{key}_out"][0].size(0)
         if padding_mask is not None:
