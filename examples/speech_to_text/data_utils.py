@@ -109,23 +109,26 @@ def _load_files(paths: List[Path]):
     return paths, data
 
 
-def create_zip(data_root: Path, zip_path: Path):
+def create_zip(data_root: Path, zip_path: Path, chunksize=None, num_workers=None):
     paths = list(data_root.glob("*.npy"))
     paths.extend(data_root.glob("*.flac"))
-    chunksize = 100
-    max_workers = (len(os.sched_getaffinity(0)) + 1) // 2
-    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_STORED) as f:
-        with tqdm(total=len(paths)) as pbar:
-            with ProcessPoolExecutor(max_workers) as exe:
-                futures = [
-                    exe.submit(_load_files, paths[i:(i + chunksize)])
-                    for i in range(0, len(paths), chunksize)
-                ]
-                for future in as_completed(futures):
-                    chunk_paths, chunk_data = future.result()
-                    for path, data in zip(chunk_paths, chunk_data):
-                        f.writestr(path.name, data)
-                        pbar.update(1)
+    if num_workers is not None:
+        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_STORED) as f:
+            with tqdm(total=len(paths)) as pbar:
+                with ProcessPoolExecutor(num_workers) as exe:
+                    futures = [
+                        exe.submit(_load_files, paths[i:(i + chunksize)])
+                        for i in range(0, len(paths), chunksize)
+                    ]
+                    for future in as_completed(futures):
+                        chunk_paths, chunk_data = future.result()
+                        for path, data in zip(chunk_paths, chunk_data):
+                            f.writestr(path.name, data)
+                            pbar.update(1)
+    else:
+        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_STORED) as f:
+            for path in tqdm(paths):
+                f.write(path, arcname=path.name)
 
 
 def _get_utt_length(_zip_path: Path, is_audio: bool, utt: Dict[str, Union[str, int]]):
@@ -145,7 +148,7 @@ def _get_utt_length(_zip_path: Path, is_audio: bool, utt: Dict[str, Union[str, i
 
 
 def get_zip_manifest(
-        zip_path: Path, zip_root: Optional[Path] = None, is_audio=False
+    zip_path: Path, zip_root: Optional[Path] = None, is_audio=False
 ):
     _zip_path = Path.joinpath(zip_root or Path(""), zip_path)
     with zipfile.ZipFile(_zip_path, mode="r") as f:
