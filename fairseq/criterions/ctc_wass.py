@@ -112,9 +112,7 @@ class CtcWassersteinCriterion(CtcCriterion):
             src_txt_lengths=net_input["src_txt_lengths"] if "src_txt_lengths" in net_input else None,
         )
         sample_size = (
-            net_input["src_tokens"].size(0)
-            if self.sentence_avg
-            else sample["ntokens"]
+            net_input["src_tokens"].size(0) if self.sentence_avg else sample["ntokens"]
         )
 
         if self.extract_text_representations_mode:
@@ -146,7 +144,7 @@ class CtcWassersteinCriterion(CtcCriterion):
             wass_emb_loss = self.compute_wass_loss(self.ot_loss, encoder_out, net_input, is_embedding=True)
             loss += self.ot_emb_weight * wass_emb_loss
             extra["wass_emb_loss"] = wass_emb_loss
-
+    
         logging_output = {
             "loss": utils.item(loss.data)
             if loss != 0.0
@@ -164,9 +162,12 @@ class CtcWassersteinCriterion(CtcCriterion):
             "nsentences": sample["id"].numel(),
             "sample_size": net_input["src_tokens"].size(0)
             if self.sentence_avg
-            else sample["ntokens"]
+            else sample["ntokens"],
+            "num_valid_examples": net_input["src_tokens"].size(0),
         }
         
+        if "modified_valid_examples" in encoder_out[0]:
+            logging_output["num_valid_examples"] = encoder_out[0]["modified_valid_examples"][0].long().sum().item()
         if net_output is not None and "compression_rate" in net_output[-1]:
             logging_output["compression_rate"] = utils.item(
                 net_output[-1]["compression_rate"].data.sum()
@@ -332,21 +333,6 @@ class CtcWassersteinCriterion(CtcCriterion):
         else:
             non_padding_text = (torch.ones(B, T) > 0).to(device=text_out.device)
 
-        valid_idx = (speech_lens > 2) & (text_lens > 2)
-        B = valid_idx.sum()
-        
-        if B == 0:
-            wass_loss = torch.tensor(0.0, device=speech_out.device)
-            return wass_loss
-        
-        speech_out = speech_out[:, valid_idx, :]
-        non_padding_speech = non_padding_speech[valid_idx, :]
-        speech_lens = speech_lens[valid_idx]
-        
-        text_out = text_out[:, valid_idx, :]
-        non_padding_text = non_padding_text[valid_idx, :]
-        text_lens = text_lens[valid_idx]
-            
         if self.ot_positional_weight > 0.0:
             # create tensor in which the elements are range of lengths
             speech_pos = torch.matmul(
@@ -421,6 +407,9 @@ class CtcWassersteinCriterion(CtcCriterion):
         sample_size = utils.item(
             sum(log.get("sample_size", 0) for log in logging_outputs)
         )
+        num_valid_examples = utils.item(
+            sum(log.get("num_valid_examples", 0) for log in logging_outputs)
+        )
         metrics.log_scalar(
             "loss", loss_sum / sample_size / math.log(2), sample_size, round=3
         )
@@ -454,6 +443,7 @@ class CtcWassersteinCriterion(CtcCriterion):
 
         metrics.log_scalar("ntokens", ntokens)
         metrics.log_scalar("nsentences", nsentences)
+        metrics.log_scalar("invalid_examples", nsentences - num_valid_examples)
 
         c_errors = sum(log.get("c_errors", 0) for log in logging_outputs)
         metrics.log_scalar("_c_errors", c_errors)

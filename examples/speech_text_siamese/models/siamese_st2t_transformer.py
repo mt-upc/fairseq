@@ -645,7 +645,7 @@ class SiameseST2TTransformerModel(FairseqEncoderDecoderModel):
 
             if self.decoder.cfg.ctc_compression:
                 decoder_out, speech_out = self.decoder.compress(decoder_out, speech_out)
-                        
+
         speech_out = self.encoder.forward_adaptor(speech_out)
         
         speech_out = self.encoder.forward_embedder(speech_out)

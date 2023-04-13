@@ -111,6 +111,7 @@ class CTCDecoder(FairseqDecoder):
         return x.transpose(0, 1), {"attn": [], "inner_states": None}
 
     def compress(self, decoder_out, speech_out):
+        # TODO move the overlapping functionality here
         if self.cfg.ctc_compression_type == "letter":
             return self.compress_letter(decoder_out, speech_out)
         elif self.cfg.ctc_compression_type == "word":
@@ -199,27 +200,30 @@ class CTCDecoder(FairseqDecoder):
         preds = preds.transpose(0, 1)
 
         t = (preds != self.blank_idx).sum(dim=-1).max().item()
+        if not t:
+            t = 1 # for rare case where whole batch is blank
         x_compr = torch.zeros(B, t, D, device=x.device, dtype=x.dtype)
         lengths_compr = torch.zeros(B, device=x.device, dtype=torch.long)
+        valid_examples = torch.zeros(B, device=x.device, dtype=torch.bool)
 
         for i in range(B):
             p, c = preds[i].unique_consecutive(return_counts=True)
             valid_mask_i = p != self.blank_idx
             x_splt = torch.split(x[i], c.tolist())
             out = torch.stack([t.mean(dim=0) for t in x_splt])
-            out = out[valid_mask_i]
-            x_compr[i, :out.size(0)] = out
-            lengths_compr[i] = out.size(0)
+            if not valid_mask_i.any():
+                # empty examples have just one blank
+                x_compr[i, :1] = out
+                lengths_compr[i] = 1
+            else:
+                out = out[valid_mask_i]
+                x_compr[i, :out.size(0)] = out
+                lengths_compr[i] = out.size(0)
+                valid_examples[i] = True
 
         max_length = lengths_compr.max().item()
-        x_compr = x_compr[:, :max_length]
-        
-        if not x_compr.size(1):
-            logger.info(
-                "No frames left after CTC compression. Returning original output."
-            )
-            return decoder_out, speech_out
 
+        x_compr = x_compr[:, :max_length]
         x_compr_mask = lengths_to_padding_mask(lengths_compr)
 
         if hasattr(self, "post"):
@@ -227,12 +231,11 @@ class CTCDecoder(FairseqDecoder):
                 
         if hasattr(self, "final_layernorm"):
             x_compr = self.final_layernorm(x_compr)
-            
+        
         decoder_out[-1]["compression_rate"] = (
             prev_lengths.float() - lengths_compr.float()
         ) / prev_lengths.float()
-
-        assert x_compr.size(0) == speech_out["encoder_out"][0].size(0)
+        speech_out["modified_valid_examples"] = [valid_examples]
         speech_out["modified_out"] = [x_compr]
         speech_out["modified_padding_mask"] = [x_compr_mask]
         speech_out["modified_out_lengths"] = [lengths_compr]
