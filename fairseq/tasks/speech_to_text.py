@@ -137,6 +137,10 @@ class SpeechToTextTaskConfig(FairseqDataclass):
         default=None,
         metadata={"help": "Target language to be used with Fairseq's interactive mode."}
     )
+    only_construct_model: bool = field(
+        default=False,
+        metadata={"help": "Only construct the model, save it, and exit."},
+    )
 
 
 @register_task("speech_to_text", dataclass=SpeechToTextTaskConfig)
