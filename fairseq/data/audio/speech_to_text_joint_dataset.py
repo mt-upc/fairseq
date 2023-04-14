@@ -175,14 +175,24 @@ class SpeechToTextJointDataset(SpeechToTextDataset):
             ali = torch.Tensor(self.alignment[index]).float()
 
         src_txt_repr, src_txt_emb = None, None
+        if "europarlst" in self.split:
+            dataset = "EuroparlST"
+        elif "mustcv2" in self.split:
+            dataset = "MUSTC_v2.0"
+        elif "mustcv3" in self.split:
+            dataset = "MUSTC_v3.0"
+        elif "cv11" in self.split:
+            dataset = "CV"
+        elif "covost" in self.split:
+            dataset = "CoVoST"
         if hasattr(self, "cached_encoder_representations"):
             src_txt_repr = torch.load(
-                self.cached_encoder_representations / f"{s2t_dataset_item.id}.pt",
+                self.cached_encoder_representations / dataset / f"{s2t_dataset_item.id}.pt",
                 map_location=torch.device("cpu")
             )
         if hasattr(self, "cached_encoder_embeddings"):
             src_txt_emb = torch.load(
-                self.cached_encoder_embeddings / f"{s2t_dataset_item.id}_emb.pt",
+                self.cached_encoder_embeddings / dataset / f"{s2t_dataset_item.id}_emb.pt",
                 map_location=torch.device("cpu")                
             )
 
