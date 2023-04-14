@@ -55,6 +55,7 @@ class MUSTC(Dataset):
 
     def __init__(self, root: str, lang: str, split: str) -> None:
         assert split in self.SPLITS and lang in self.LANGUAGES
+        self.lang = lang
         _root = Path(root) / f"en-{lang}" / "data" / split
         wav_root, txt_root = _root / "wav", _root / "txt"
         assert _root.is_dir() and wav_root.is_dir() and txt_root.is_dir()
@@ -137,6 +138,7 @@ def _get_utt_manifest(
         "n_frames": audio_lengths[utt_id],
         "tgt_text": src_utt if task == "asr" else tgt_utt,
         "speaker": speaker_id,
+        "tgt_lang": dataset.lang,
     }
 
 
