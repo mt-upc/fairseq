@@ -62,13 +62,6 @@ class CtcWassersteinCriterionConfig(CtcCriterionConfig):
         default=1.0,
         metadata={"help": "Weight for OT positional embeddings"},
     )
-    extract_text_representations_mode: bool = field(
-        default=False,
-        metadata={"help": "Extract encoder representations mode, not training."},
-    )
-    extract_save_dir: str = field(
-        default="mbart_representations", metadata={"help": "Directory to save representations"}
-    )
 
 @register_criterion(
     "ctc_wass_loss", dataclass=CtcWassersteinCriterionConfig
@@ -88,8 +81,6 @@ class CtcWassersteinCriterion(CtcCriterion):
         self.ot_blur = cfg.ot_blur
         self.ot_scaling = cfg.ot_scaling
         self.ot_positional_weight = cfg.ot_positional_weight
-        self.extract_text_representations_mode = cfg.extract_text_representations_mode
-        self.extract_save_dir = Path(cfg.extract_save_dir)
 
         logging.info(f"*** Loss function ***")
         logging.info(f"ctc_weight = {self.ctc_weight}")
@@ -115,20 +106,14 @@ class CtcWassersteinCriterion(CtcCriterion):
             net_input["src_tokens"].size(0) if self.sentence_avg else sample["ntokens"]
         )
 
-        if self.extract_text_representations_mode:
-            self.extract_text_representations(encoder_out, sample)
-
         loss = 0.0
         extra = {"ctc_loss": 0.0, "wass_loss": 0.0, "wass_emb_loss": 0.0}
 
         if self.ctc_weight > 0.0:
-            try:
-                ctc_loss, extra = self.compute_ctc_loss(
-                    model, net_output, encoder_out, sample["target"], extra
-                )
-                loss += self.ctc_weight * ctc_loss
-            except RuntimeError as e:
-                logging.error(f"RuntimeError: {e}")
+            ctc_loss, extra = self.compute_ctc_loss(
+                model, net_output, encoder_out, sample["target"], extra
+            )
+            loss += self.ctc_weight * ctc_loss
 
         if self.ot_weight > 0.0:
             wass_loss = self.compute_wass_loss(self.ot_loss, encoder_out, net_input)
@@ -163,7 +148,7 @@ class CtcWassersteinCriterion(CtcCriterion):
             "sample_size": net_input["src_tokens"].size(0)
             if self.sentence_avg
             else sample["ntokens"],
-            "num_valid_examples": net_input["src_tokens"].size(0),
+            "num_valid_examples": sample["id"].numel(),
         }
         
         if "modified_valid_examples" in encoder_out[0]:
@@ -368,22 +353,6 @@ class CtcWassersteinCriterion(CtcCriterion):
             ).sum()
             
         return wass_loss
-    
-    def extract_text_representations(self, encoder_out, sample):
-        x = encoder_out[1]["encoder_out"][0].detach().clone().transpose(0, 1) # B x T x C
-        x_emb = encoder_out[1]["embed_src_tokens"][0].detach().clone().transpose(0, 1) # B x T x C
-        lengths = encoder_out[1]["src_lengths"][0].squeeze(-1) # B
-        
-        for i in range(len(x)):
-            id = sample["example_id"][i]
-            file_path = self.extract_save_dir / f"{id}.pt"
-            if not file_path.exists():
-                x_i = x[i, :lengths[i], :].contiguous()
-                torch.save(x_i, file_path)
-            file_path = self.extract_save_dir / f"{id}_emb.pt"
-            if not file_path.exists():
-                x_emb_i = x_emb[i, :lengths[i], :].contiguous()
-                torch.save(x_emb_i, file_path)
 
     @staticmethod
     def reduce_metrics(logging_outputs) -> None:
@@ -443,7 +412,11 @@ class CtcWassersteinCriterion(CtcCriterion):
 
         metrics.log_scalar("ntokens", ntokens)
         metrics.log_scalar("nsentences", nsentences)
-        metrics.log_scalar("invalid_examples", nsentences - num_valid_examples)
+        metrics.log_scalar(
+            "invalid_examples",
+            100 * (nsentences - num_valid_examples) / nsentences, 
+            round=2
+        )
 
         c_errors = sum(log.get("c_errors", 0) for log in logging_outputs)
         metrics.log_scalar("_c_errors", c_errors)
