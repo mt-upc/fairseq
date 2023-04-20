@@ -114,7 +114,10 @@ class CrossEntropyWithKDCriterion(FairseqCriterion):
         if self.cfg.teacher_lambda == 1.0 and self.cfg.force_calculate_nll:
             with torch.no_grad():
                 truth_loss = self.get_nll_loss(model, net_output, sample)
-            
+        
+        if isinstance(loss, float) and loss == 0.0: 
+            loss = truth_loss.new_zeros(truth_loss.shape)
+        
         if reduce:
             loss = loss.sum()
             with torch.no_grad():
