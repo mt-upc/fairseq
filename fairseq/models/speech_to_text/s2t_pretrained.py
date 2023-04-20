@@ -411,6 +411,7 @@ class S2TPretrainedEncoder(FairseqEncoder, S2TPretrainedComponent):
             # freeze the ctc decoder projection since there is no CTC loss
             # TODO: maybe also freeze post projection layer?
             ctc_decoder.proj.requires_grad = False
+            logger.info(f"Freezing CTCDecoder projection layer")
             self.coupling_modules.append(ctc_decoder)
         if cfg.conv1d_adaptor:
             if hasattr(cfg.conv1d_adaptor, "path") and cfg.conv1d_adaptor.path != "":
