@@ -228,7 +228,7 @@ def should_stop_early(cfg: DictConfig, valid_loss: float) -> bool:
         return False
 
     def is_better(a, b):
-        return a > b if cfg.checkpoint.maximize_best_checkpoint_metric else a < b
+        return a > b if cfg.checkpoint.maximize_early_stop_metric else a < b
 
     prev_best = getattr(should_stop_early, "best", None)
     if prev_best is None or is_better(valid_loss, prev_best):
@@ -411,19 +411,19 @@ def validate_and_save(
     )
 
     # Validate
-    valid_losses = [None]
+    valid_losses1, valid_losses2 = [None], [None]
     if do_validate:
-        valid_losses = validate(cfg, trainer, task, epoch_itr, valid_subsets)
+        valid_losses1, valid_losses2 = validate(cfg, trainer, task, epoch_itr, valid_subsets)
 
-    should_stop |= should_stop_early(cfg, valid_losses[0])
+    should_stop |= should_stop_early(cfg, valid_losses1[0])
 
     # Save checkpoint
     if do_save or should_stop:
         checkpoint_utils.save_checkpoint(
-            cfg.checkpoint, trainer, epoch_itr, valid_losses[0]
+            cfg.checkpoint, trainer, epoch_itr, valid_losses2[0]
         )
 
-    return valid_losses, should_stop
+    return valid_losses1, should_stop
 
 
 def get_training_stats(stats: Dict[str, Any]) -> Dict[str, Any]:
@@ -437,7 +437,7 @@ def validate(
     task: tasks.FairseqTask,
     epoch_itr,
     subsets: List[str],
-) -> List[Optional[float]]:
+) -> Tuple[List[Optional[float]] ,List[Optional[float]]]:
     """Evaluate the model on the validation set(s) and return the losses."""
 
     if cfg.dataset.fixed_validation_seed is not None:
@@ -445,7 +445,7 @@ def validate(
         utils.set_torch_seed(cfg.dataset.fixed_validation_seed)
 
     trainer.begin_valid_epoch(epoch_itr.epoch)
-    valid_losses = []
+    valid_losses1, valid_losses2 = [], []
     for subset_idx, subset in enumerate(subsets):
         logger.info('begin validation on "{}" subset'.format(subset))
 
@@ -498,8 +498,9 @@ def validate(
 
         progress.print(stats, tag=subset, step=trainer.get_num_updates())
 
-        valid_losses.append(stats[cfg.checkpoint.best_checkpoint_metric])
-    return valid_losses
+        valid_losses1.append(stats[cfg.checkpoint.early_stop_metric])
+        valid_losses2.append(stats[cfg.checkpoint.best_checkpoint_metric])
+    return valid_losses1, valid_losses2
 
 
 def get_valid_stats(
