@@ -848,6 +848,7 @@ class Trainer(object):
                     torch.cuda.empty_cache()
             except RuntimeError as e:
                 if "out of memory" in str(e):
+                    logger.info(f"OOM in forward/backward pass, for input of size: {sample['net_input']['src_tokens'].shape}")
                     self._log_oom(e)
                     if raise_oom:
                         raise e
