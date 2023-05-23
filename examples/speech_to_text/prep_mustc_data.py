@@ -144,55 +144,52 @@ def _get_utt_manifest(
 
 def process(args):
     root = Path(args.data_root).absolute()
-    for lang in MUSTC.LANGUAGES:
-        cur_root = root / f"en-{lang}"
-        if not cur_root.is_dir():
-            print(f"{cur_root.as_posix()} does not exist. Skipped.")
-            continue
-        # Extract features
-        audio_root = cur_root / ("flac" if args.use_audio_input else "fbank80")
-        audio_root.mkdir(exist_ok=True)
+    lang = args.tgt_lang
+    cur_root = root / f"en-{lang}"
+    # Extract features
+    audio_root = cur_root / ("flac" if args.use_audio_input else "fbank80")
+    audio_root.mkdir(exist_ok=True)
 
-        for split in MUSTC.SPLITS:
-            print(f"Fetching split {split}...")
-            dataset = MUSTC(root.as_posix(), lang, split)
-            if args.use_audio_input:
-                print("Converting audios...")
-                tgt_sample_rate = 16_000
-                _convert_and_save_ = partial(
-                    _convert_and_save, dataset, audio_root, tgt_sample_rate
+    for split in MUSTC.SPLITS:
+        print(f"Fetching split {split}...")
+        dataset = MUSTC(root.as_posix(), lang, split)
+        if args.use_audio_input:
+            print("Converting audios...")
+            tgt_sample_rate = 16_000
+            _convert_and_save_ = partial(
+                _convert_and_save, dataset, audio_root, tgt_sample_rate
+            )
+            num_cpus = len(os.sched_getaffinity(0))
+            with Pool(num_cpus) as p:
+                _ = list(
+                    tqdm(
+                        p.imap(
+                            _convert_and_save_,
+                            range(len(dataset)),
+                            chunksize=100
+                        ),
+                        total=len(dataset)
+                    )
                 )
-                num_cpus = len(os.sched_getaffinity(0))
-                with Pool(num_cpus) as p:
-                    _ = list(
-                        tqdm(
-                            p.imap(
-                                _convert_and_save_,
-                                range(len(dataset)),
-                                chunksize=100
-                            ),
-                            total=len(dataset)
-                        )
-                    )
-            else:
-                print("Extracting log mel filter bank features...")
-                gcmvn_feature_list = []
-                if split == 'train' and args.cmvn_type == "global":
-                    print("And estimating cepstral mean and variance stats...")
+        else:
+            print("Extracting log mel filter bank features...")
+            gcmvn_feature_list = []
+            if split == 'train' and args.cmvn_type == "global":
+                print("And estimating cepstral mean and variance stats...")
 
-                for waveform, sample_rate, _, _, _, utt_id in tqdm(dataset):
-                    features = extract_fbank_features(
-                        waveform, sample_rate, audio_root / f"{utt_id}.npy"
-                    )
-                    if split == 'train' and args.cmvn_type == "global":
-                        if len(gcmvn_feature_list) < args.gcmvn_max_num:
-                            gcmvn_feature_list.append(features)
-
+            for waveform, sample_rate, _, _, _, utt_id in tqdm(dataset):
+                features = extract_fbank_features(
+                    waveform, sample_rate, audio_root / f"{utt_id}.npy"
+                )
                 if split == 'train' and args.cmvn_type == "global":
-                    # Estimate and save cmv
-                    stats = cal_gcmvn_stats(gcmvn_feature_list)
-                    with open(cur_root / "gcmvn.npz", "wb") as f:
-                        np.savez(f, mean=stats["mean"], std=stats["std"])
+                    if len(gcmvn_feature_list) < args.gcmvn_max_num:
+                        gcmvn_feature_list.append(features)
+
+            if split == 'train' and args.cmvn_type == "global":
+                # Estimate and save cmv
+                stats = cal_gcmvn_stats(gcmvn_feature_list)
+                with open(cur_root / "gcmvn.npz", "wb") as f:
+                    np.savez(f, mean=stats["mean"], std=stats["std"])
 
         # Pack features into ZIP
         zip_path = cur_root / f"{audio_root.name}.zip"
@@ -338,6 +335,7 @@ def main():
              "variance"
         )
     parser.add_argument("--use-audio-input", action="store_true")
+    parser.add_argument("--tgt-lang", "-l", type=str, required=True)
     args = parser.parse_args()
 
     if args.joint:
