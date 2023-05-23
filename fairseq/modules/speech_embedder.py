@@ -28,6 +28,9 @@ class EmbedderConfig(FairseqDataclass):
     path: str = field(
         default="", metadata={"help": "path for pre-trained embedder checkpoint"}
     )
+    freeze: bool = field(
+        default=False, metadata={"help": "freeze embedder parameters"}
+    )
 
 
 class Embedder(nn.Module):

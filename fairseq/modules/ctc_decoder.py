@@ -59,6 +59,9 @@ class CTCDecoderConfig(FairseqDataclass):
     final_layernorm: bool = field(
         default=False, metadata={"help": "whether to use final layer normalization"}
     )
+    freeze: bool = field(
+        default=False, metadata={"help": "freeze ctc decoder parameters"}
+    )
 
 
 class CTCDecoder(FairseqDecoder):

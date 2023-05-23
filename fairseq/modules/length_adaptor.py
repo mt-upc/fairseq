@@ -62,6 +62,9 @@ class Conv1dAdaptorConfig(FairseqDataclass):
     final_layer_norm: bool = field(
         default=False, metadata={"help": "whether to apply final layer norm"}
     )
+    freeze: bool = field(
+        default=False, metadata={"help": "freeze Conv1d Adaptor parameters"}
+    )
 
 
 class Conv1dAdaptor(nn.Module):

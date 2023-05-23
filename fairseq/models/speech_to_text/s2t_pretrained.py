@@ -412,6 +412,10 @@ class S2TPretrainedEncoder(FairseqEncoder, S2TPretrainedComponent):
             # TODO: maybe also freeze post projection layer?
             ctc_decoder.proj.requires_grad = False
             logger.info(f"Freezing CTCDecoder projection layer")
+            if hasattr(cfg.ctc_decoder, "freeze") and cfg.ctc_decoder.freeze:
+                logger.info(f"Freezing CTCDecoder")
+                for p in ctc_decoder.parameters():
+                    p.requires_grad = False
             self.coupling_modules.append(ctc_decoder)
         if cfg.conv1d_adaptor:
             if hasattr(cfg.conv1d_adaptor, "path") and cfg.conv1d_adaptor.path != "":
@@ -421,6 +425,10 @@ class S2TPretrainedEncoder(FairseqEncoder, S2TPretrainedComponent):
                 adaptor.load_state_dict(ckpt["model"])
             else:
                 adaptor = Conv1dAdaptor(cfg.conv1d_adaptor)
+            if hasattr(cfg.conv1d_adaptor, "freeze") and cfg.conv1d_adaptor.freeze:
+                logger.info(f"Freezing Conv1dAdaptor")
+                for p in adaptor.parameters():
+                    p.requires_grad = False
             self.coupling_modules.append(adaptor)
         if cfg.modality_adapter:
             self.coupling_modules.append(
@@ -435,6 +443,10 @@ class S2TPretrainedEncoder(FairseqEncoder, S2TPretrainedComponent):
             else:
                 # TODO initialize from pretrained encoder-decoder
                 embedder = Embedder(cfg.embedder)
+            if hasattr(cfg.embedder, "freeze") and cfg.embedder.freeze:
+                logger.info(f"Freezing Embedder")
+                for p in embedder.parameters():
+                    p.requires_grad = False
             self.coupling_modules.append(embedder)
         if cfg.context_encoder:
             if hasattr(cfg.context_encoder, "path") and cfg.context_encoder.path != "":
