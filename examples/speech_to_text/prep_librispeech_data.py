@@ -9,7 +9,7 @@ import logging
 from pathlib import Path
 import shutil
 from tempfile import NamedTemporaryFile
-
+import soundfile as sf
 import pandas as pd
 from examples.speech_to_text.data_utils import (
     create_zip,
@@ -19,6 +19,7 @@ from examples.speech_to_text.data_utils import (
     get_zip_manifest,
     save_df_to_tsv,
 )
+from fairseq.data.audio.audio_utils import convert_waveform
 from torchaudio.datasets import LIBRISPEECH
 from tqdm import tqdm
 
@@ -34,6 +35,7 @@ SPLITS = [
     "test-clean",
     "test-other",
 ]
+TGT_SAMPLE_RATE = 16000
 
 MANIFEST_COLUMNS = ["id", "audio", "n_frames", "tgt_text", "speaker"]
 
@@ -42,23 +44,40 @@ def process(args):
     out_root = Path(args.output_root).absolute()
     out_root.mkdir(exist_ok=True)
     # Extract features
-    feature_root = out_root / "fbank80"
-    feature_root.mkdir(exist_ok=True)
-    for split in SPLITS:
-        print(f"Fetching split {split}...")
-        dataset = LIBRISPEECH(out_root.as_posix(), url=split, download=True)
-        print("Extracting log mel filter bank features...")
-        for wav, sample_rate, _, spk_id, chapter_no, utt_no in tqdm(dataset):
-            sample_id = f"{spk_id}-{chapter_no}-{utt_no}"
-            extract_fbank_features(
-                wav, sample_rate, feature_root / f"{sample_id}.npy"
-            )
-    # Pack features into ZIP
-    zip_path = out_root / "fbank80.zip"
-    print("ZIPing features...")
-    create_zip(feature_root, zip_path)
+    
+    audio_root = out_root / ("flac" if args.use_audio_input else "fbank80")
+    audio_root.mkdir(exist_ok=True)
+    zip_path = out_root / f"{audio_root.name}.zip"
+    
+    if not zip_path.exists():
+        for split in SPLITS:
+            print(f"Fetching split {split}...")
+            dataset = LIBRISPEECH(out_root.as_posix(), url=split, download=True)
+            print("Extracting features...")
+            for wav, sample_rate, _, spk_id, chapter_no, utt_no in tqdm(dataset):
+                sample_id = f"{spk_id}-{chapter_no}-{utt_no}"
+                if args.use_audio_input:
+                    _wav, _ = convert_waveform(
+                        wav, sample_rate, to_mono=True,
+                        to_sample_rate=TGT_SAMPLE_RATE
+                    )
+                    sf.write(
+                        (audio_root / f"{sample_id}.flac").as_posix(),
+                        _wav.T.numpy(), TGT_SAMPLE_RATE
+                    )
+                else:
+                    extract_fbank_features(
+                        wav, sample_rate, audio_root / f"{sample_id}.npy"
+                    )
+        # Pack features into ZIP
+        print("ZIPing features...")
+        create_zip(audio_root, zip_path)
+
     print("Fetching ZIP manifest...")
-    audio_paths, audio_lengths = get_zip_manifest(zip_path)
+    audio_paths, audio_lengths = get_zip_manifest(
+        zip_path,
+        is_audio=args.use_audio_input
+    )
     # Generate TSV manifest
     print("Generating manifest...")
     train_text = []
@@ -77,26 +96,30 @@ def process(args):
         )
         if split.startswith("train"):
             train_text.extend(manifest["tgt_text"])
-    # Generate vocab
-    vocab_size = "" if args.vocab_type == "char" else str(args.vocab_size)
-    spm_filename_prefix = f"spm_{args.vocab_type}{vocab_size}"
-    with NamedTemporaryFile(mode="w") as f:
-        for t in train_text:
-            f.write(t + "\n")
-        gen_vocab(
-            Path(f.name),
-            out_root / spm_filename_prefix,
-            args.vocab_type,
-            args.vocab_size,
+    
+    if not args.no_vocab:
+        # Generate vocab
+        vocab_size = "" if args.vocab_type == "char" else str(args.vocab_size)
+        spm_filename_prefix = f"spm_{args.vocab_type}{vocab_size}"
+        with NamedTemporaryFile(mode="w") as f:
+            for t in train_text:
+                f.write(t + "\n")
+            gen_vocab(
+                Path(f.name),
+                out_root / spm_filename_prefix,
+                args.vocab_type,
+                args.vocab_size,
+            )
+        # Generate config YAML
+        gen_config_yaml(
+            out_root,
+            spm_filename=spm_filename_prefix + ".model",
+            specaugment_policy="ld"
         )
-    # Generate config YAML
-    gen_config_yaml(
-        out_root,
-        spm_filename=spm_filename_prefix + ".model",
-        specaugment_policy="ld"
-    )
+        
     # Clean up
-    shutil.rmtree(feature_root)
+    if audio_root.is_dir():
+        shutil.rmtree(audio_root)
 
 
 def main():
@@ -110,6 +133,8 @@ def main():
         choices=["bpe", "unigram", "char"],
     ),
     parser.add_argument("--vocab-size", default=10000, type=int)
+    parser.add_argument("--use-audio-input", action="store_true")
+    parser.add_argument("--no-vocab", action="store_true")
     args = parser.parse_args()
 
     process(args)
