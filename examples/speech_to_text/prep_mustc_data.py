@@ -148,91 +148,96 @@ def process(args):
     cur_root = root / f"en-{lang}"
     # Extract features
     audio_root = cur_root / ("flac" if args.use_audio_input else "fbank80")
-    audio_root.mkdir(exist_ok=True)
-
-    for split in MUSTC.SPLITS:
-        print(f"Fetching split {split}...")
-        dataset = MUSTC(root.as_posix(), lang, split)
-        if args.use_audio_input:
-            print("Converting audios...")
-            tgt_sample_rate = 16_000
-            _convert_and_save_ = partial(
-                _convert_and_save, dataset, audio_root, tgt_sample_rate
-            )
-            num_cpus = len(os.sched_getaffinity(0))
-            with Pool(num_cpus) as p:
-                _ = list(
-                    tqdm(
-                        p.imap(
-                            _convert_and_save_,
-                            range(len(dataset)),
-                            chunksize=100
-                        ),
-                        total=len(dataset)
+    zip_path = cur_root / f"{audio_root.name}.zip"
+    zip_exists = zip_path.is_file()
+    
+    if not zip_exists:
+        audio_root.mkdir(exist_ok=True)
+        for split in MUSTC.SPLITS:
+            print(f"Fetching split {split}...")
+            dataset = MUSTC(root.as_posix(), lang, split)
+            if args.use_audio_input:
+                print("Converting audios...")
+                tgt_sample_rate = 16_000
+                _convert_and_save_ = partial(
+                    _convert_and_save, dataset, audio_root, tgt_sample_rate
+                )
+                num_cpus = len(os.sched_getaffinity(0))
+                with Pool(num_cpus) as p:
+                    _ = list(
+                        tqdm(
+                            p.imap(
+                                _convert_and_save_,
+                                range(len(dataset)),
+                                chunksize=100
+                            ),
+                            total=len(dataset)
+                        )
                     )
-                )
-        else:
-            print("Extracting log mel filter bank features...")
-            gcmvn_feature_list = []
-            if split == 'train' and args.cmvn_type == "global":
-                print("And estimating cepstral mean and variance stats...")
-
-            for waveform, sample_rate, _, _, _, utt_id in tqdm(dataset):
-                features = extract_fbank_features(
-                    waveform, sample_rate, audio_root / f"{utt_id}.npy"
-                )
+            else:
+                print("Extracting log mel filter bank features...")
+                gcmvn_feature_list = []
                 if split == 'train' and args.cmvn_type == "global":
-                    if len(gcmvn_feature_list) < args.gcmvn_max_num:
-                        gcmvn_feature_list.append(features)
+                    print("And estimating cepstral mean and variance stats...")
 
-            if split == 'train' and args.cmvn_type == "global":
-                # Estimate and save cmv
-                stats = cal_gcmvn_stats(gcmvn_feature_list)
-                with open(cur_root / "gcmvn.npz", "wb") as f:
-                    np.savez(f, mean=stats["mean"], std=stats["std"])
+                for waveform, sample_rate, _, _, _, utt_id in tqdm(dataset):
+                    features = extract_fbank_features(
+                        waveform, sample_rate, audio_root / f"{utt_id}.npy"
+                    )
+                    if split == 'train' and args.cmvn_type == "global":
+                        if len(gcmvn_feature_list) < args.gcmvn_max_num:
+                            gcmvn_feature_list.append(features)
+
+                if split == 'train' and args.cmvn_type == "global":
+                    # Estimate and save cmv
+                    stats = cal_gcmvn_stats(gcmvn_feature_list)
+                    with open(cur_root / "gcmvn.npz", "wb") as f:
+                        np.savez(f, mean=stats["mean"], std=stats["std"])
 
         # Pack features into ZIP
-        zip_path = cur_root / f"{audio_root.name}.zip"
         print("ZIPing audios/features...")
         create_zip(audio_root, zip_path)
-        print("Fetching ZIP manifest...")
-        audio_paths, audio_lengths = get_zip_manifest(
-            zip_path,
-            is_audio=args.use_audio_input,
+
+    print("Fetching ZIP manifest...")
+    audio_paths, audio_lengths = get_zip_manifest(
+        zip_path,
+        is_audio=args.use_audio_input,
+    )
+    # Generate TSV manifest
+    print("Generating manifest...")
+    train_text = []
+    for split in MUSTC.SPLITS:
+        is_train_split = split.startswith("train")
+        manifest = {c: [] for c in MANIFEST_COLUMNS}
+        dataset = MUSTC(args.data_root, lang, split)
+        _get_utt_manifest_ = partial(
+            _get_utt_manifest,
+            dataset, audio_paths, audio_lengths, args.task
         )
-        # Generate TSV manifest
-        print("Generating manifest...")
-        train_text = []
-        for split in MUSTC.SPLITS:
-            is_train_split = split.startswith("train")
-            manifest = {c: [] for c in MANIFEST_COLUMNS}
-            dataset = MUSTC(args.data_root, lang, split)
-            _get_utt_manifest_ = partial(
-                _get_utt_manifest,
-                dataset, audio_paths, audio_lengths, args.task
-            )
-            num_processes = len(os.sched_getaffinity(0))
-            with ThreadPool(num_processes) as p:
-                manifest = list(
-                    tqdm(
-                        p.imap(
-                            _get_utt_manifest_,
-                            list(range(len(dataset))),
-                            chunksize=100
-                        ),
-                        total=len(dataset),
-                    )
+        num_processes = len(os.sched_getaffinity(0))
+        with ThreadPool(num_processes) as p:
+            manifest = list(
+                tqdm(
+                    p.imap(
+                        _get_utt_manifest_,
+                        list(range(len(dataset))),
+                        chunksize=100
+                    ),
+                    total=len(dataset),
                 )
-            if is_train_split:
-                train_text.extend([utt['tgt_text'] for utt in manifest])
-            df = pd.DataFrame.from_records(manifest)
-            df = filter_manifest_df(
-                df,
-                is_train_split=is_train_split,
-                min_n_frames=(5 if not args.use_audio_input else 8000),
-                max_n_frames=(3000 if not args.use_audio_input else 480_000),
             )
-            save_df_to_tsv(df, cur_root / f"{split}_{args.task}.tsv")
+        if is_train_split:
+            train_text.extend([utt['tgt_text'] for utt in manifest])
+        df = pd.DataFrame.from_records(manifest)
+        df = filter_manifest_df(
+            df,
+            is_train_split=is_train_split,
+            min_n_frames=(5 if not args.use_audio_input else 8000),
+            max_n_frames=(3000 if not args.use_audio_input else 480_000),
+        )
+        save_df_to_tsv(df, cur_root / f"{split}_{args.task}.tsv")
+    
+    if not args.no_vocab:
         # Generate vocab
         v_size_str = "" if args.vocab_type == "char" else str(args.vocab_size)
         spm_filename_prefix = f"spm_{args.vocab_type}{v_size_str}_{args.task}"
@@ -266,7 +271,9 @@ def process(args):
                     else None
                 ),
             )
-        # Clean up
+
+    # Clean up
+    if audio_root.is_dir():
         shutil.rmtree(audio_root)
 
 
@@ -317,7 +324,6 @@ def main():
     parser.add_argument(
         "--vocab-type",
         default="unigram",
-        required=True,
         type=str,
         choices=["bpe", "unigram", "char"],
     ),
@@ -336,6 +342,7 @@ def main():
         )
     parser.add_argument("--use-audio-input", action="store_true")
     parser.add_argument("--tgt-lang", "-l", type=str, required=True)
+    parser.add_argument("--no-vocab", action="store_true")
     args = parser.parse_args()
 
     if args.joint:
