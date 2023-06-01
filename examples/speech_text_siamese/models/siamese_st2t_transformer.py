@@ -330,6 +330,8 @@ class SiameseSpeechTextEncoders(FairseqEncoder):
         return speech_out
     
     def forward_embedder(self, speech_out):
+        if not hasattr(self, "embedder"):
+            return speech_out
         
         if "modified_out" in speech_out:
             key = "modified"
