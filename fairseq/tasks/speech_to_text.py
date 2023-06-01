@@ -19,7 +19,6 @@ from fairseq.data.audio.speech_to_text_dataset import (
     SpeechToTextDatasetCreator,
     get_features_or_waveform,
 )
-from fairseq.data.audio.speech_augmentation_dataset import SpeechAugmentationDataset
 from fairseq.data.audio.speech_distillation_dataset import SpeechDistillationDataset
 
 from fairseq.dataclass import FairseqDataclass
@@ -32,38 +31,6 @@ from fairseq.utils import safe_hasattr
 EVAL_BLEU_ORDER=4
 
 logger = logging.getLogger(__name__)
-
-@dataclass
-class DataAugmentationConfig(FairseqDataclass):
-    p_augm: float = field(
-        default=0,
-        metadata={"help":
-            "The probability that data augmentation is applied to an example."
-            "0 means that data augmentation is not active."
-        }
-    )
-    tempo: str = field(
-        default="1,1",
-        metadata={"help": "The range from which to sample the tempo factor"}
-    )
-    pitch: str = field(
-        default="0,0",
-        metadata={"help":
-            "The range from which to sample the pitch value."
-            "Measured in cents (i.e. 100ths of a semitone)"
-        }
-    )
-    echo_delay: str = field(
-        default="0,0",
-        metadata={"help":
-            "The range from which to sample the echo delay value."
-            "Measured in milliseconds"
-        }
-    )
-    echo_decay: str = field(
-        default="0,0",
-        metadata={"help": "The range from which to sample the echo decay factor."}
-    )
 
 @dataclass
 class KnowledgeDistillationConfig(FairseqDataclass):
@@ -120,11 +87,6 @@ class SpeechToTextTaskConfig(FairseqDataclass):
     # Inherit from other configs
     train_subset: str = II("dataset.train_subset")
     seed: int = II("common.seed")
-    
-    data_augmentation: Optional[DataAugmentationConfig] = field(
-        default=None,
-        metadata={"help": "Data augmentation arguments"},
-    )
     knowledge_distillation: Optional[KnowledgeDistillationConfig] = field(
         default=None,
         metadata={"help": "Knowledge distillation arguments"}
@@ -170,18 +132,6 @@ class SpeechToTextTask(FairseqTask):
             self.scorers.append(
                 scoring.build_scorer(cfg.eval_bleu_config, self.tgt_dict)
             )
-            
-        # effect parameters for data augmentation
-        self.effects_info = None
-        if getattr(cfg, "data_augmentation", None) is not None and cfg.data_augmentation.p_augm > 0:
-            self.effects_info = {
-                "tempo": list(map(float, cfg.data_augmentation.tempo.split(","))),
-                "pitch": list(map(int, cfg.data_augmentation.pitch.split(","))),
-                "echo": {
-                    "delay": list(map(int, cfg.data_augmentation.echo_delay.split(","))),
-                    "decay": list(map(float, cfg.data_augmentation.echo_decay.split(",")))
-                }
-            }
             
         self.sampling_ratios = None
         if getattr(cfg, "sampling_ratios", None) is not None:
@@ -239,27 +189,14 @@ class SpeechToTextTask(FairseqTask):
             seed=self.cfg.seed,
             speaker_to_id=self.speaker_to_id,
             sampling_ratios=self.sampling_ratios,
-            no_standardize_audio=is_train_split and self.effects_info is not None
         )
         
-        if is_train_split:
-            if self.use_kd:
-                self.datasets[split] = SpeechDistillationDataset(
-                    self.datasets[split],
-                    self.cfg.knowledge_distillation.path,
-                    pad_idx=self.tgt_dict.pad()
-                )
-            
-            if self.effects_info is not None:
-                logger.info(f"Using data augmentation on '{split}' with probability "
-                            f"of {self.cfg.data_augmentation.p_augm} and the following "
-                            f"configuration: {self.effects_info}")
-                self.datasets[split] = SpeechAugmentationDataset(
-                    self.datasets[split],
-                    effects_info=self.effects_info,
-                    p_augm=self.cfg.data_augmentation.p_augm,
-                    max_src_len=self.cfg.max_source_positions
-                )
+        if is_train_split and self.use_kd:
+            self.datasets[split] = SpeechDistillationDataset(
+                self.datasets[split],
+                self.cfg.knowledge_distillation.path,
+                pad_idx=self.tgt_dict.pad()
+            )
 
     @property
     def target_dictionary(self):
