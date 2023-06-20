@@ -8,4 +8,3 @@ from .convtransformer import *  # noqa
 from .s2t_transformer import *  # noqa
 from .xm_transformer import *  # noqa
 from .s2t_conformer import *  # noqa
-from .s2t_pretrained import *  # noqa
