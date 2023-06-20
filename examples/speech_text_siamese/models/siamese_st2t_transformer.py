@@ -6,6 +6,7 @@ import torch
 import torch.nn as nn
 
 from fairseq import utils
+from fairseq.data import Dictionary
 from fairseq.data.data_utils import lengths_to_padding_mask
 from fairseq.dataclass.utils import convert_namespace_to_omegaconf
 from fairseq.models import (
@@ -21,8 +22,8 @@ from fairseq.models.wav2vec import Wav2VecEncoder
 from fairseq.modules import (
     CTCDecoder,
     CTCDecoderConfig,
-    Conv1dAdaptor,
-    Conv1dAdaptorConfig,
+    Adaptor,
+    AdaptorConfig,
     TransformerEncoderLayers,
     Embedder,
     EmbedderConfig
@@ -35,7 +36,7 @@ logger = logging.getLogger(__name__)
 
 
 class DummyDecoder(FairseqDecoder):
-    def __init__(self, dictionary):
+    def __init__(self, dictionary=None):
         super().__init__(dictionary)
 
 
@@ -65,12 +66,10 @@ class SiameseSpeechTextEncoders(FairseqEncoder):
             self.context_encoder = context_encoder
 
         self.ctc_layer_id = args.w2v_ctc_layer_id
-        self.freeze_text_encoder = args.freeze_text_encoder
         self.retain_dropout_in_frozen_text_encoder = args.retain_dropout_in_frozen_text_encoder
         self.freeze_speech_encoder_layers = args.freeze_speech_encoder_layers
-        self.retain_dropout_in_frozen_speech_encoder = args.retain_dropout_in_frozen_speech_encoder
 
-        self._maybe_freeze_text_encoder()  
+        self._freeze_text_encoder()  
         self._maybe_freeze_speech_encoder_layers()
         self._maybe_freeze_context_encoder()
 
@@ -188,19 +187,27 @@ class SiameseSpeechTextEncoders(FairseqEncoder):
     
     @classmethod
     def build_adaptor(cls, args, spch_encoder):
-        if args.only_ctc or not args.conv1d_adaptor_layers:
+        if args.only_ctc:
             return None
         
-        adaptor_cfg = Conv1dAdaptorConfig()
-        adaptor_cfg.in_channels = spch_encoder.embed_dim
-        adaptor_cfg.out_channels = spch_encoder.embed_dim
-        adaptor_cfg.mid_channels = spch_encoder.embed_dim
-        adaptor_cfg.num_layers = args.conv1d_adaptor_layers
-        adaptor_cfg.kernel_size = args.conv1d_adaptor_kernel_size
-        adaptor_cfg.stride = args.conv1d_adaptor_stride
-        adaptor_cfg.final_layer_norm = True
+        if not args.adaptor_layers \
+        and not args.adaptor_pre_projection \
+        and not args.adaptor_post_projection:
+            return None
         
-        adaptor = Conv1dAdaptor(adaptor_cfg)
+        adaptor_cfg = AdaptorConfig()
+        adaptor_cfg.embed_dim = spch_encoder.embed_dim
+        adaptor_cfg.num_layers = args.adaptor_layers
+        adaptor_cfg.kernel_size = args.adaptor_kernel_size
+        adaptor_cfg.stride = args.adaptor_stride
+        adaptor_cfg.pre_projection = args.adaptor_pre_projection
+        adaptor_cfg.post_projection = args.adaptor_post_projection
+        adaptor_cfg.projection_dim = args.adaptor_projection_dim
+        adaptor_cfg.dropout_rate = args.adaptor_dropout
+        adaptor_cfg.use_final_layer_norm = args.adaptor_final_layer_norm
+        # adaptor_cfg.use_final_layer_norm = False
+        
+        adaptor = Adaptor(adaptor_cfg)
         
         args.adaptor_args = adaptor_cfg
             
@@ -208,7 +215,21 @@ class SiameseSpeechTextEncoders(FairseqEncoder):
     
     @classmethod
     def build_embedder(cls, args, spch_encoder, text_encoder):
-        eos_token, bos_token = "</s>", "<lang:eng_Latn>"
+        eos_token = "</s>"
+        
+        if "<lang:eng_Latn>" in text_encoder.dictionary.symbols:
+            model_name="nllb"
+        else:
+            model_name="mbart"
+
+        if model_name == "nllb":
+            bos_token = "<lang:eng_Latn>"
+            learned_pos = False
+            max_positions = 512
+        else:
+            bos_token = "<lang:en>"
+            learned_pos = True
+            max_positions = 1024
         
         if args.only_ctc:
             return None
@@ -218,15 +239,16 @@ class SiameseSpeechTextEncoders(FairseqEncoder):
         embedder_cfg = EmbedderConfig()
         embedder_cfg.use_special_embedding = args.use_special_embedding
         embedder_cfg.use_positional_embedding = args.use_positional_embedding
+        embedder_cfg.scale_embedding = args.scale_embedding
         embedder_cfg.embed_dim = spch_encoder.embed_dim
+        embedder_cfg.max_source_positions = max_positions
+        embedder_cfg.is_learned = learned_pos
+        embedder_cfg.layer_norm_special = args.adaptor_final_layer_norm
         embedder = Embedder(embedder_cfg)
         
         if text_encoder is not None:
             if args.use_special_embedding:
-                try:
-                    bos_idx = text_encoder.dictionary.symbols.index(bos_token)
-                except ValueError:
-                    bos_idx = text_encoder.dictionary.symbols.index("<lang:en>")
+                bos_idx = text_encoder.dictionary.symbols.index(bos_token)
                 weights_bos = text_encoder.embed_tokens.weight[bos_idx].data
                 embedder.bos_emb = nn.Parameter(weights_bos)
                 
@@ -234,8 +256,7 @@ class SiameseSpeechTextEncoders(FairseqEncoder):
                 weights_eos = text_encoder.embed_tokens.weight[eos_idx].data
                 embedder.eos_emb = nn.Parameter(weights_eos)
                 logger.info("Loaded special embeddings for BOS and EOS from text encoder")
-            if args.use_positional_embedding:
-                # TODO: replace this with normal sinusoïdal positional embedding
+            if args.use_positional_embedding and learned_pos:
                 embedder.pos_emb.load_state_dict(text_encoder.embed_positions.state_dict())
                 embedder.layernorm.load_state_dict(text_encoder.layernorm_embedding.state_dict())
                 logger.info("Loaded positional embedding and layernorm embedding from text encoder")
@@ -365,10 +386,12 @@ class SiameseSpeechTextEncoders(FairseqEncoder):
     def forward_text(self, src_txt_tokens, src_txt_lengths):
         if not hasattr(self, "text_encoder"):
             return None
+        if self.text_encoder.training:
+            self.text_encoder.eval()
         return self.text_encoder(src_txt_tokens, src_txt_lengths)
     
-    def _maybe_freeze_text_encoder(self):
-        if hasattr(self, "text_encoder") and self.freeze_text_encoder:
+    def _freeze_text_encoder(self):
+        if hasattr(self, "text_encoder"):
             logger.info(f"Freezing text encoder ...")
             for n, p in self.text_encoder.named_parameters():
                 logger.info(f"- freezing {n}")
@@ -386,7 +409,8 @@ class SiameseSpeechTextEncoders(FairseqEncoder):
                 for n, p in layer.named_parameters():
                     logger.info(f"- freezing {name} {n}")
                     p.requires_grad = False
-                
+        
+        # TODO there are some more dropouts that need to be frozen *also masking
         if self.freeze_speech_encoder_layers > 0:
             logger.info(f"Freezing speech encoder layers ...")
             for i, layer in enumerate(self.spch_encoder.w2v_model.encoder.layers):
@@ -394,12 +418,11 @@ class SiameseSpeechTextEncoders(FairseqEncoder):
                     for n, p in layer.named_parameters():
                         logger.info(f"- freezing layer{i} {n}")
                         p.requires_grad = False
-                    if not self.retain_dropout_in_frozen_speech_encoder:
-                        layer.self_attn.dropout_module.p = 0.0
-                        layer.dropout1.p = 0.0
-                        layer.dropout2.p = 0.0
-                        layer.dropout3.p = 0.0
-                        
+                    layer.self_attn.dropout_module.p = 0.0
+                    layer.dropout1.p = 0.0
+                    layer.dropout2.p = 0.0
+                    layer.dropout3.p = 0.0
+                    
     def _maybe_freeze_context_encoder(self):
         if hasattr(self, "context_encoder") and not self.args.ot_weight:
             logger.info(f"Freezing context encoder ...")
@@ -417,20 +440,36 @@ class SiameseST2TTransformerModel(FairseqEncoderDecoderModel):
     @staticmethod
     def add_args(parser):
         parser.add_argument(
-            "--conv1d-adaptor-layers", type=int, default=0, help="number of layers in conv1d adaptor"
+            "--adaptor-layers", type=int, default=0, help="number of layers in adaptor"
         )
         parser.add_argument(
-            "--conv1d-adaptor-kernel-size", type=int, default=3, help="kernel size in conv1d adaptor"
+            "--adaptor-kernel-size", type=int, default=3, help="kernel size in adaptor"
         )
         parser.add_argument(
-            "--conv1d-adaptor-stride", type=int, default=2, help="stride in conv1d adaptor"
+            "--adaptor-stride", type=int, default=2, help="stride in adaptor"
+        )
+        parser.add_argument(
+            "--adaptor-pre-projection", type=str, default="false",
+            help="apply pre-projection to adaptor"
+        )
+        parser.add_argument(
+            "--adaptor-post-projection", type=str, default="false",
+            help="apply post-projection to adaptor"
+        )
+        parser.add_argument(
+            "--adaptor-dropout", type=float, default=0.0, help="dropout in adaptor"
+        )
+        parser.add_argument(
+            "--adaptor-final-layer-norm", type=str, default="false",
+            help="apply layer norm to adaptor output"
+        )
+        parser.add_argument(
+            "--adaptor-projection-dim", type=int, default=8192,
+            help="projection dimension in adaptor"
         )
         parser.add_argument(
             "--ctc-compression", type=str, default="false",
             help="Apply CTC compression to speech encoder's output",
-        )
-        parser.add_argument(
-            "--freeze-text-encoder", type=str, default="true", help="Freeze text encoder"
         )
         parser.add_argument(
             "--speech-model-path", type=str, default="", help="path to pre-trained speech model"
@@ -503,10 +542,6 @@ class SiameseST2TTransformerModel(FairseqEncoderDecoderModel):
             "-1 means no freezing, 0 means freeze feature-extractor, 1 means freeze feature-extractor and encoder.layer.0, etc..."
         )
         parser.add_argument(
-            "--retain-dropout-in-frozen-speech-encoder", type=str, default="false",
-            help="rerain dropout in frozen speech encoder layers"
-        )
-        parser.add_argument(
             "--no-text-encoder", type=str, default="false",
             help="do not use text encoder (no OT), use only speech encoder"
         )
@@ -519,20 +554,21 @@ class SiameseST2TTransformerModel(FairseqEncoderDecoderModel):
             help="use positional embedding in the output of the speech encoder"
         )
         parser.add_argument(
-            "--ctc-compression-type", type=str, default="letter", choices=["letter", "word"],
-            help="type of CTC compression"
+            "--scale-embedding", type=str, default="false",
+            help="scale the representation before applying the positional embedding"
+            "in the embedder module."
         )
         parser.add_argument(
-            "--ctc-post-compression-layer", type=str, default="false",
-            help="apply a linear layer after CTC compression"
+            "--ctc-compression-type", type=str, default="letter", choices=["letter", "word"],
+            help="type of CTC compression"
         )
         parser.add_argument(
             "--ctc-compression-pooling-fn", type=str, default="mean", choices=["mean", "max", "attention"],
             help="pooling function to use for CTC compression"
         )
         parser.add_argument(
-            "--ctc-post-compression-dim", type=int, default=4096,
-            help="dimension of the linear layer after CTC compression"
+            "--ctc-dictionary", type=str, default="",
+            help="path to the dictionary for CTC compression"
         )
         
     @classmethod
@@ -564,20 +600,19 @@ class SiameseST2TTransformerModel(FairseqEncoderDecoderModel):
             ctc_decoder_cfg.dropout_rate = encoder.spch_encoder.final_dropout.p
             ctc_decoder_cfg.ctc_compression = args.ctc_compression
             ctc_decoder_cfg.ctc_compression_type = args.ctc_compression_type
-            ctc_decoder_cfg.post_compression_layer = args.ctc_post_compression_layer
-            ctc_decoder_cfg.post_compression_dim = args.ctc_post_compression_dim
             ctc_decoder_cfg.pooling_fn = args.ctc_compression_pooling_fn
             ctc_decoder_cfg.layernorm = args.w2v_ctc_layer_id != -1
             ctc_decoder_cfg.final_layernorm = True
-            
-            decoder = CTCDecoder(task.target_dictionary, ctc_decoder_cfg)
+            ctc_decoder_cfg.dictionary_path = args.ctc_dictionary
+                
+            decoder = CTCDecoder(ctc_decoder_cfg)
             # initialized the decoder's projection layer with the encoder's ctc projection layer
             decoder.proj = encoder.spch_encoder.proj
             
             args.ctc_decoder_cfg = ctc_decoder_cfg
             
         else:
-            decoder = DummyDecoder(task.target_dictionary)
+            decoder = DummyDecoder()
             
         return decoder
 
@@ -588,21 +623,23 @@ class SiameseST2TTransformerModel(FairseqEncoderDecoderModel):
             default_bool = lambda x: getattr(args, x, "false") == "true"
             
             args.w2v_ctc_layer_id = getattr(args, "w2v_ctc_layer_id", -1)
-            args.conv1d_adaptor_layers = getattr(args, "conv1d_adaptor_layers", 0)
+            args.adaptor_layers = getattr(args, "adaptor_layers", 0)
+            args.adaptor_projection_dim = getattr(args, "adaptor_projection_dim", 8192)
             args.freeze_speech_encoder_layers = getattr(args, "freeze_speech_encoder_layers", -1)
-            args.ctc_post_compression_dim = getattr(args, "ctc_post_compression_dim", 4096)
             args.ctc_compression_type = getattr(args, "ctc_compression_type", "letter")
             args.ctc_compression_pooling_fn = getattr(args, "ctc_compression_pooling_fn", "mean")
-            args.freeze_text_encoder = default_bool("freeze_text_encoder")
+            args.adaptor_dropout = getattr(args, "adaptor_dropout", 0.0)
             args.use_context_encoder = default_bool("use_context_encoder")
             args.retain_dropout_in_frozen_text_encoder = default_bool("retain_dropout_in_frozen_text_encoder")
             args.ctc_compression = default_bool("ctc_compression")
             args.w2v_apply_mask = default_bool("w2v_apply_mask")
-            args.retain_dropout_in_frozen_speech_encoder = default_bool("retain_dropout_in_frozen_speech_encoder")
             args.no_text_encoder = default_bool("no_text_encoder")
             args.use_special_embedding = default_bool("use_special_embedding")
             args.use_positional_embedding = default_bool("use_positional_embedding")
-            args.ctc_post_compression_layer = default_bool("ctc_post_compression_layer")
+            args.scale_embedding = default_bool("scale_embedding")
+            args.adaptor_pre_projection = default_bool("adaptor_pre_projection")
+            args.adaptor_post_projection = default_bool("adaptor_post_projection")
+            args.adaptor_final_layer_norm = default_bool("adaptor_final_layer_norm")
             args.only_ctc = not args.ot_weight and not args.ot_emb_weight
         
         encoder = cls.build_encoder(args, task)
@@ -615,7 +652,6 @@ class SiameseST2TTransformerModel(FairseqEncoderDecoderModel):
         return cls(encoder, decoder)
 
     def get_normalized_probs(self, net_output, log_probs, sample=None, idx=0):
-        breakpoint()
         lprobs = self.get_normalized_probs_scriptable(
             net_output, log_probs, sample, idx=idx
         )
@@ -624,7 +660,6 @@ class SiameseST2TTransformerModel(FairseqEncoderDecoderModel):
 
     def get_normalized_probs_scriptable(self, net_output, log_probs, sample, idx=0):
         """Get normalized probabilities (or log probs) from a net's output."""
-        breakpoint()
         assert not isinstance(self.decoder, DummyDecoder)
 
         if hasattr(self, "adaptive_softmax") and self.adaptive_softmax is not None:
@@ -690,6 +725,7 @@ class SiameseST2TTransformerModel(FairseqEncoderDecoderModel):
 
         decoder_out = None
         if isinstance(self.decoder, CTCDecoder):
+            breakpoint()
             decoder_out = self.decoder(speech_out)
 
             if self.decoder.cfg.ctc_compression:
@@ -730,7 +766,7 @@ class SiameseZSTransformer(BaseFairseqModel):
             help="path to decoder model"
         )
         parser.add_argument(
-            "--not-load-submodules", action="store_true",
+            "--not-load-submodules", type=str, default="false",
         )
 
     @staticmethod
@@ -772,6 +808,8 @@ class SiameseZSTransformer(BaseFairseqModel):
     
     @classmethod
     def build_model(cls, args, task):
+        default_bool = lambda x: getattr(args, x, "false") == "true"
+        args.not_load_submodules = default_bool("not_load_submodules")
         encoder = cls.build_encoder(args, task)
         decoder = cls.build_decoder(args, task)
         return cls(encoder, decoder)
