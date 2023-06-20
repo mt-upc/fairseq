@@ -7,7 +7,6 @@
 import logging
 import math
 from dataclasses import dataclass, field
-from pathlib import Path
 
 import torch
 import torch.nn.functional as F
@@ -283,11 +282,11 @@ class CtcWassersteinCriterion(CtcCriterion):
     
     def _get_text_repr(self, net_input, encoder_out, is_embedding=False):
         
-        if "src_txt_repr" in net_input:
+        if "src_txt_enc" in net_input:
             if is_embedding:
                 text_out = net_input["src_txt_emb"].transpose(0, 1)
             else:
-                text_out = net_input["src_txt_repr"].transpose(0, 1) # T x B x D
+                text_out = net_input["src_txt_enc"].transpose(0, 1) # T x B x D
             text_lens = net_input["src_txt_lengths"] # torch.Size([B])
             text_padding_mask = lengths_to_padding_mask(text_lens) # B x T
         else:
@@ -304,6 +303,10 @@ class CtcWassersteinCriterion(CtcCriterion):
         
         speech_out, speech_lens, speech_padding_mask = self._get_speech_repr(encoder_out, is_embedding)
         text_out, text_lens, text_padding_mask = self._get_text_repr(net_input, encoder_out, is_embedding)
+        
+        if is_embedding:
+            speech_out = F.normalize(speech_out, p=2, dim=-1)
+            text_out = F.normalize(text_out, p=2, dim=-1)
             
         S, B, _ = speech_out.size()
         T = text_out.size()[0]
@@ -317,6 +320,10 @@ class CtcWassersteinCriterion(CtcCriterion):
             non_padding_text = ~text_padding_mask # B x T
         else:
             non_padding_text = (torch.ones(B, T) > 0).to(device=text_out.device)
+            
+        # zero-out padding (fix nans due to normalization)
+        speech_out = speech_out.masked_fill(non_padding_speech.transpose(0, 1).unsqueeze(-1) == 0, 0.0)
+        text_out = text_out.masked_fill(non_padding_text.transpose(0, 1).unsqueeze(-1) == 0, 0.0)
 
         if self.ot_positional_weight > 0.0:
             # create tensor in which the elements are range of lengths
