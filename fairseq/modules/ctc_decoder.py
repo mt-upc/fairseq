@@ -5,6 +5,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from fairseq.data import Dictionary
 from fairseq.data.data_utils import lengths_to_padding_mask
 from fairseq.dataclass import FairseqDataclass
 from fairseq.models import FairseqDecoder
@@ -35,12 +36,6 @@ class CTCDecoderConfig(FairseqDataclass):
         default="letter",
         metadata={"help": "ctc-based compression type: letter or word"},
     )
-    post_compression_layer: bool = field(
-        default=False, metadata={"help": "whether to use post-compression layer"}
-    )
-    post_compression_dim: int = field(
-        default=4096, metadata={"help": "post-compression layer dimension"}
-    )
     pooling_fn: str = field(
         default="mean", metadata={"help": "pooling function: max, mean, attention"}
     )
@@ -50,22 +45,20 @@ class CTCDecoderConfig(FairseqDataclass):
             "help": "whether to use layer normalization before ctc projection layer"
         },
     )
-    path: str = field(
-        default="", metadata={"help": "path to pre-trained ctc decoder checkpoint"}
-    )
-    dictionary: str = field(
+    dictionary_path: str = field(
         default="", metadata={"help": "path to the ctc model dictionary for inference"}
-    )
-    final_layernorm: bool = field(
-        default=False, metadata={"help": "whether to use final layer normalization"}
-    )
-    freeze: bool = field(
-        default=False, metadata={"help": "freeze ctc decoder parameters"}
     )
 
 
 class CTCDecoder(FairseqDecoder):
-    def __init__(self, dictionary, cfg: CTCDecoderConfig):
+    def __init__(self, cfg: CTCDecoderConfig):
+        
+        dictionary = Dictionary.load(cfg.dictionary_path)
+        # correct the ctc dictionary
+        dictionary.symbols[0], dictionary.symbols[1] = dictionary.symbols[1], dictionary.symbols[0]
+        dictionary.indices["<s>"], dictionary.indices["<pad>"] = 1, 0
+        dictionary.bos_index, dictionary.pad_index = 1, 0
+    
         super().__init__(dictionary)
 
         self.cfg = cfg
@@ -84,17 +77,6 @@ class CTCDecoder(FairseqDecoder):
         logger.info(f"| dictionary for CTC module: {len(dictionary)} types")
         logger.info(f"| CTC-based compression: {cfg.ctc_compression}")
         logger.info(f"| CTC-based compression type: {cfg.ctc_compression_type}")
-
-        if cfg.ctc_compression and cfg.post_compression_layer:
-            self.post = nn.Sequential(
-                LayerNorm(cfg.embed_dim),
-                nn.Linear(cfg.embed_dim,  cfg.post_compression_dim),
-                nn.GELU(),
-                nn.Linear(cfg.post_compression_dim, cfg.embed_dim),
-            )
-            logger.info(f"| post-compression layer: True with dim {cfg.post_compression_dim}")
-        if cfg.ctc_compression and cfg.final_layernorm:
-            self.final_layernorm = LayerNorm(cfg.embed_dim)
 
     def forward(self, speech_out):
         if (
@@ -173,12 +155,6 @@ class CTCDecoder(FairseqDecoder):
         x_compr = x_compr[:, :max_length]
         x_compr_mask = lengths_to_padding_mask(lengths_compr)
 
-        if hasattr(self, "post"):
-            x_compr = self.post(x_compr)
-                
-        if hasattr(self, "final_layernorm"):
-            x_compr = self.final_layernorm(x_compr)
-
         decoder_out[-1]["compression_rate"] = (
             prev_lengths.float() - lengths_compr.float()
         ) / prev_lengths.float()
@@ -228,12 +204,6 @@ class CTCDecoder(FairseqDecoder):
 
         x_compr = x_compr[:, :max_length]
         x_compr_mask = lengths_to_padding_mask(lengths_compr)
-
-        if hasattr(self, "post"):
-            x_compr = self.post(x_compr)
-                
-        if hasattr(self, "final_layernorm"):
-            x_compr = self.final_layernorm(x_compr)
         
         decoder_out[-1]["compression_rate"] = (
             prev_lengths.float() - lengths_compr.float()
