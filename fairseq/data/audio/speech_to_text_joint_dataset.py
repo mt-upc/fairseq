@@ -66,12 +66,8 @@ class S2TJointDataConfig(S2TDataConfig):
         return self.config.get("prepend_src_lang_tag", False)
     
     @property
-    def cached_encoder_representations(self):
-        return self.config.get("cached_encoder_representations", None)
-    
-    @property
-    def cached_encoder_embeddings(self):
-        return self.config.get("cached_encoder_embeddings", None)
+    def mt_model_name(self):
+        return self.config.get("mt_model_name", None)
 
 
 class SpeechToTextJointDatasetItem(NamedTuple):
@@ -83,7 +79,7 @@ class SpeechToTextJointDatasetItem(NamedTuple):
     src_lang_tag: Optional[int] = None
     tgt_alignment: Optional[torch.Tensor] = None
     id: Optional[str] = None
-    src_txt_repr: Optional[torch.Tensor] = None
+    src_txt_enc: Optional[torch.Tensor] = None
     src_txt_emb: Optional[torch.Tensor] = None
 
 
@@ -105,6 +101,7 @@ class SpeechToTextJointDataset(SpeechToTextDataset):
         src_langs: Optional[List[str]] = None,
         tgt_langs: Optional[List[str]] = None,
         ids: Optional[List[str]] = None,
+        src_text_reprs: Optional[List[str]] = None,
         tgt_dict: Optional[Dictionary] = None,
         src_dict: Optional[Dictionary] = None,
         pre_tokenizer=None,
@@ -127,6 +124,7 @@ class SpeechToTextJointDataset(SpeechToTextDataset):
             src_langs=src_langs,
             tgt_langs=tgt_langs,
             ids=ids,
+            src_text_reprs=src_text_reprs,
             tgt_dict=tgt_dict,
             pre_tokenizer=pre_tokenizer,
             bpe_tokenizer=bpe_tokenizer,
@@ -137,16 +135,15 @@ class SpeechToTextJointDataset(SpeechToTextDataset):
         self.src_pre_tokenizer = src_pre_tokenizer
         self.src_bpe_tokenizer = src_bpe_tokenizer
         self.alignment = None
-        if cfg.cached_encoder_representations is not None:
-            self.cached_encoder_representations = Path(cfg.cached_encoder_representations)
-        if cfg.cached_encoder_embeddings is not None:
-            self.cached_encoder_embeddings = Path(cfg.cached_encoder_embeddings)
-        self.load_src_text = src_texts is not None and src_dict is not None and not hasattr(self, "cached_encoder_representations")
+        self.load_src_text = src_texts is not None and src_dict is not None
+        # self.load_src_text = src_texts is not None and src_dict is not None and src_text_reprs is not None
         self.use_src_lang_id = use_src_lang_id
         if alignment is not None:
             self.alignment = [
                 [float(s) for s in sample.split()] for sample in alignment
             ]
+        if src_text_reprs is not None:
+            assert cfg.mt_model_name is not None
 
     def get_tokenized_src_text(self, index: int):
         text = self.tokenize(self.src_pre_tokenizer, self.src_texts[index])
@@ -173,29 +170,13 @@ class SpeechToTextJointDataset(SpeechToTextDataset):
         ali = None
         if self.alignment is not None:
             ali = torch.Tensor(self.alignment[index]).float()
-
-        src_txt_repr, src_txt_emb = None, None
-        if "europarlst" in self.split:
-            dataset = "EuroparlST"
-        elif "mustcv2" in self.split:
-            dataset = "MUSTC_v2.0"
-        elif "mustcv3" in self.split:
-            dataset = "MUSTC_v3.0"
-        elif "cv11" in self.split:
-            dataset = "CV"
-        elif "covost" in self.split:
-            dataset = "CoVoST"
-        if hasattr(self, "cached_encoder_representations"):
-            src_txt_repr = torch.load(
-                self.cached_encoder_representations / dataset / f"{s2t_dataset_item.id}.pt",
-                map_location=torch.device("cpu")
-            )
-        if hasattr(self, "cached_encoder_embeddings"):
-            src_txt_emb = torch.load(
-                self.cached_encoder_embeddings / dataset / f"{s2t_dataset_item.id}_emb.pt",
-                map_location=torch.device("cpu")                
-            )
-
+            
+        src_txt_enc, src_txt_emb = None, None
+        if self.src_text_reprs is not None:
+            repr = torch.load(self.src_text_reprs[index], map_location=torch.device("cpu"))
+            src_txt_enc = repr["encoder_out"]
+            src_txt_emb = repr["embed_src_tokens"]
+            
         return SpeechToTextJointDatasetItem(
             index=index,
             source=s2t_dataset_item.source,
@@ -205,22 +186,22 @@ class SpeechToTextJointDataset(SpeechToTextDataset):
             src_lang_tag=src_lang_tag,
             tgt_alignment=ali,
             id=s2t_dataset_item.id,
-            src_txt_repr=src_txt_repr,
+            src_txt_enc=src_txt_enc,
             src_txt_emb=src_txt_emb
         )
 
     def __len__(self):
         return self.n_samples
     
-    def collate_cached(self, repr: List[torch.Tensor], emb: List[torch.Tensor], order):
-        repr = [repr[i] for i in order]
-        lengths = torch.tensor([r.size(0) for r in repr], dtype=torch.long)
+    def collate_cached(self, enc: List[torch.Tensor], emb: List[torch.Tensor], order):
+        enc = [enc[i] for i in order]
+        lengths = torch.tensor([r.size(0) for r in enc], dtype=torch.long)
         max_len = lengths.max().item()
-        bs = len(repr)
-        dim = repr[0].size(1)
-        repr_collated = torch.zeros(bs, max_len, dim, dtype=repr[0].dtype, device=repr[0].device)
-        for i, r in enumerate(repr):
-            repr_collated[i, :r.size(0)] = r
+        bs = len(enc)
+        dim = enc[0].size(1)
+        enc_collated = torch.zeros(bs, max_len, dim, dtype=enc[0].dtype, device=enc[0].device)
+        for i, r in enumerate(enc):
+            enc_collated[i, :r.size(0)] = r
             
         emb_collated = None
         if emb[0] is not None:
@@ -229,7 +210,7 @@ class SpeechToTextJointDataset(SpeechToTextDataset):
             for i, e in enumerate(emb):
                 emb_collated[i, :e.size(0)] = e
 
-        return repr_collated, lengths, emb_collated
+        return enc_collated, lengths, emb_collated
         
         
     def collater(self, samples: List[SpeechToTextJointDatasetItem]) -> Dict:
@@ -258,7 +239,7 @@ class SpeechToTextJointDataset(SpeechToTextDataset):
                     src_txt_tokens.scatter_(
                         1, eos_idx.view(-1, 1), src_lang_idxs.view(-1, 1)
                     )
-                else:
+                else: # prepend lang_id
                     src_txt_tokens = torch.cat(
                         [src_lang_idxs.view(-1, 1), src_txt_tokens], dim=1
                     )
@@ -269,13 +250,13 @@ class SpeechToTextJointDataset(SpeechToTextDataset):
             net_input["src_txt_tokens"] = src_txt_tokens
             net_input["src_txt_lengths"] = src_txt_lengths
 
-        if hasattr(self, "cached_encoder_representations"):
-            src_txt_repr, src_txt_lengths, src_txt_emb = self.collate_cached(
-                [x.src_txt_repr for x in samples],
+        if samples[0].src_txt_enc is not None:
+            src_txt_enc, src_txt_lengths, src_txt_emb = self.collate_cached(
+                [x.src_txt_enc for x in samples],
                 [x.src_txt_emb for x in samples],
                 order
             )
-            net_input["src_txt_repr"] = src_txt_repr
+            net_input["src_txt_enc"] = src_txt_enc
             net_input["src_txt_lengths"] = src_txt_lengths
             net_input["src_txt_emb"] = src_txt_emb
         
@@ -329,6 +310,7 @@ class SpeechToTextJointDatasetCreator(SpeechToTextDatasetCreator):
         n_frames = [int(s[cls.KEY_N_FRAMES]) for s in samples]
         tgt_texts = [s[cls.KEY_TGT_TEXT] for s in samples]
         src_texts = [s.get(cls.KEY_SRC_TEXT, cls.DEFAULT_SRC_TEXT) for s in samples]
+        src_text_reprs = [s.get(cfg.mt_model_name, "") for s in samples]
         speakers = [s.get(cls.KEY_SPEAKER, cls.DEFAULT_SPEAKER) for s in samples]
         src_langs = [s.get(cls.KEY_SRC_LANG, cls.DEFAULT_LANG) for s in samples]
         tgt_langs = [s.get(cls.KEY_TGT_LANG, cls.DEFAULT_LANG) for s in samples]
@@ -347,6 +329,7 @@ class SpeechToTextJointDatasetCreator(SpeechToTextDatasetCreator):
             src_langs=src_langs,
             tgt_langs=tgt_langs,
             ids=ids,
+            src_text_reprs=src_text_reprs,
             tgt_dict=tgt_dict,
             src_dict=src_dict,
             pre_tokenizer=pre_tokenizer,

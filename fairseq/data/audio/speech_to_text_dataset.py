@@ -145,6 +145,7 @@ class SpeechToTextDataset(FairseqDataset):
         src_langs: Optional[List[str]] = None,
         tgt_langs: Optional[List[str]] = None,
         ids: Optional[List[str]] = None,
+        src_text_reprs: Optional[List[str]] = None,
         tgt_dict: Optional[Dictionary] = None,
         pre_tokenizer=None,
         bpe_tokenizer=None,
@@ -163,6 +164,7 @@ class SpeechToTextDataset(FairseqDataset):
         assert src_langs is None or len(src_langs) == self.n_samples
         assert tgt_langs is None or len(tgt_langs) == self.n_samples
         assert ids is None or len(ids) == self.n_samples
+        assert src_text_reprs is None or len(src_text_reprs) == self.n_samples
         assert (tgt_dict is None and tgt_texts is None) or (
             tgt_dict is not None and tgt_texts is not None
         )
@@ -172,6 +174,7 @@ class SpeechToTextDataset(FairseqDataset):
         self.tgt_dict = tgt_dict
         self.check_tgt_lang_tag()
         self.ids = ids
+        self.src_text_reprs = src_text_reprs
         self.shuffle = cfg.shuffle if is_train_split else False
 
         self.feature_transforms = CompositeAudioFeatureTransform.from_config_dict(
