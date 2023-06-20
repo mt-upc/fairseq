@@ -50,12 +50,7 @@ from .rotary_positional_embedding import RotaryPositionalEmbedding
 from .positional_encoding import (
     RelPositionalEncoding,
 )
-from .length_adaptor import (
-    Conv1dAdaptorConfig,
-    Conv1dAdaptor,
-    ModalityAdapterConfig,
-    ModalityAdapter,
-)
+from .adaptor import AdaptorConfig, Adaptor
 from .ctc_decoder import CTCDecoder, CTCDecoderConfig
 from .transformer_encoder_layers import TransformerEncoderLayers
 from .speech_embedder import Embedder, EmbedderConfig
@@ -110,10 +105,8 @@ __all__ = [
     "RelPositionalEncoding",
     "RotaryPositionalEmbedding",
     "RotaryPositionMultiHeadedAttention",
-    "Conv1dAdaptorConfig",
-    "Conv1dAdaptor",
-    "ModalityAdapterConfig",
-    "ModalityAdapter",
+    "AdaptorConfig",
+    "Adaptor",
     "CTCDecoder",
     "CTCDecoderConfig",
     "TransformerEncoderLayers",
