@@ -50,7 +50,7 @@ class AdaptorConfig(FairseqDataclass):
         default=False,
         metadata={"help": "whether to apply layer normalization to the output of the Adaptor"}
     )
-    dropout_rate: float = field(
+    dropout: float = field(
         default=0.0,
         metadata={"help": "dropout rate for the Adaptor"}
     )
@@ -64,7 +64,7 @@ class Adaptor(nn.Module):
                 LayerNorm(cfg.embed_dim),
                 nn.Linear(cfg.embed_dim, cfg.projection_dim),
                 nn.GELU(),
-                nn.Dropout(cfg.dropout_rate),
+                nn.Dropout(cfg.dropout),
                 nn.Linear(cfg.projection_dim, cfg.embed_dim)
             )
         if cfg.post_projection:
@@ -72,10 +72,10 @@ class Adaptor(nn.Module):
                 LayerNorm(cfg.embed_dim),
                 nn.Linear(cfg.embed_dim, cfg.projection_dim),
                 nn.GELU(),
-                nn.Dropout(cfg.dropout_rate),
+                nn.Dropout(cfg.dropout),
                 nn.Linear(cfg.projection_dim, cfg.embed_dim),
             )
-        self.dropout = FairseqDropout(cfg.dropout_rate)
+        self.dropout = FairseqDropout(cfg.dropout)
 
         dim_factor = 2 if cfg.activation_fn == 'glu' else 1
         self.layers = nn.ModuleList(
