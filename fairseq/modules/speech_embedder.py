@@ -9,14 +9,14 @@ from fairseq.modules import LayerNorm, PositionalEmbedding
 
 
 @dataclass
-class EmbedderConfig(FairseqDataclass):
+class SpeechEmbedderConfig(FairseqDataclass):
     use_special_embedding: bool = field(
         default=False, metadata={"help": "use BOS and EOS embedding"}
     )
     use_positional_embedding: bool = field(
         default=False, metadata={"help": "use positional embedding"}
     )
-    is_learned: bool = field(
+    learned_positional_embedding: bool = field(
         default=False, metadata={"help": "use learned positional embedding"}
     )
     scale_embedding: bool = field(
@@ -36,8 +36,8 @@ class EmbedderConfig(FairseqDataclass):
     )
 
 
-class Embedder(nn.Module):
-    def __init__(self, cfg: EmbedderConfig):
+class SpeechEmbedder(nn.Module):
+    def __init__(self, cfg: SpeechEmbedderConfig):
         super().__init__()
 
         self.cfg = cfg
@@ -51,12 +51,11 @@ class Embedder(nn.Module):
                 cfg.max_source_positions,
                 cfg.embed_dim,
                 cfg.padding_idx,
-                learned=cfg.is_learned,
+                learned=cfg.learned_positional_embedding,
             )
-            if cfg.is_learned:
+            if cfg.learned_positional_embedding:
                 self.layernorm = LayerNorm(cfg.embed_dim)
         self.pre_scale = 7.0 if cfg.scale_embedding else 1.0
-        # self.post_scale = nn.Parameter(torch.ones(cfg.embed_dim))
         
     def forward(self, x, padding_mask=None):
         """Add special embedding and positional embedding.
