@@ -1,4 +1,5 @@
 from dataclasses import dataclass, field
+import math
 
 import torch
 from torch import nn
@@ -54,8 +55,14 @@ class SpeechEmbedder(nn.Module):
                 learned=cfg.learned_positional_embedding,
             )
             if cfg.learned_positional_embedding:
-                self.layernorm = LayerNorm(cfg.embed_dim)
-        self.pre_scale = 7.0 if cfg.scale_embedding else 1.0
+                self.embedding_layernorm = LayerNorm(cfg.embed_dim)
+        self.scale = 1.0
+        if cfg.scale_embedding:
+            if cfg.layer_norm_special:
+                self.scale = 7.0
+            else:
+                self.scale = math.sqrt(cfg.embed_dim)
+        # self.scale = math.sqrt(cfg.embed_dim) if cfg.scale_embedding else 1.0
         
     def forward(self, x, padding_mask=None):
         """Add special embedding and positional embedding.
@@ -71,15 +78,17 @@ class SpeechEmbedder(nn.Module):
         assert B == len(lengths)
         
         if self.cfg.use_special_embedding:
-            # prepend bos
             if hasattr(self, "layernorm_special"):
                 bos_emb = self.layernorm_special(self.bos_emb)
                 eos_emb = self.layernorm_special(self.eos_emb)
             else:
                 bos_emb = self.bos_emb
                 eos_emb = self.eos_emb
+                
+            # prepend bos
             x = torch.cat([bos_emb.view(1, 1, -1).expand(B, 1, -1), x], dim=1)
             lengths += 1
+            
             # append padding (zeros) and then convert first padding to eos
             x = torch.cat([x, torch.zeros(B, 1, x.size(-1), device=x.device, dtype=x.dtype)], dim=1)
             for i in range(B):
@@ -88,11 +97,11 @@ class SpeechEmbedder(nn.Module):
             
             padding_mask = lengths_to_padding_mask(lengths)
         
-        x *= self.pre_scale
+        x *= self.scale
         
         if self.cfg.use_positional_embedding:
             x = x + self.pos_emb(padding_mask.long())
-            if hasattr(self, "layernorm"):
-                x = self.layernorm(x)
+            if hasattr(self, "embedding_layernorm"):
+                x = self.embedding_layernorm(x)
             
         return x, padding_mask, lengths
