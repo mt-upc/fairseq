@@ -36,7 +36,7 @@ class CTCDecoderConfig(FairseqDataclass):
     dictionary_path: str = field(
         default=MISSING, metadata={"help": "path to the ctc model dictionary for inference"}
     )
-    dropout_rate: float = field(
+    dropout: float = field(
         default=0.0, metadata={"help": "dropout rate before the ctc projection layer"}
     )
     layernorm: bool = field(
@@ -69,7 +69,7 @@ class CTCDecoder(FairseqDecoder):
         if cfg.layernorm:
             self.layer_norm = LayerNorm(cfg.embed_dim)
 
-        self.dropout_module = FairseqDropout(cfg.dropout_rate)
+        self.dropout_module = FairseqDropout(cfg.dropout)
         self.proj = nn.Linear(cfg.embed_dim, len(dictionary), bias=True)
 
         logger.info(f"| dictionary for CTC module: {len(dictionary)} types")
