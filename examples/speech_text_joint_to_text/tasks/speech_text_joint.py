@@ -6,6 +6,8 @@ import logging
 import os
 from argparse import Namespace
 from pathlib import Path
+from dataclasses import dataclass, field
+from typing import List, Optional
 
 import torch
 from fairseq.data import (
@@ -30,134 +32,121 @@ from fairseq.data.audio.speech_to_text_joint_dataset import (
     SpeechToTextJointDatasetCreator,
 )
 from fairseq.tasks import register_task
-from fairseq.tasks.speech_to_text import SpeechToTextTask
+from fairseq.tasks.speech_to_text import SpeechToTextTask, SpeechToTextTaskConfig
 from fairseq.tasks.translation import load_langpair_dataset
 
 logger = logging.getLogger(__name__)
 LANG_TAG_TEMPLATE = "<lang:{}>"
 
+@dataclass
+class SpeechTextJointToTextTaskConfig(SpeechToTextTaskConfig):
+    parallel_text_data: str = field(
+        default="",
+        metadata={"help": "path to parallel text data directory"},
+    )
+    max_tokens_text: Optional[int] = field(
+        default=None,
+        metadata={"help": "maximum tokens for encoder text input"},
+    )
+    max_positions_text: int = field(
+        default=400,
+        metadata={"help": "maximum tokens for per encoder text input"},
+    )
+    langpairs: Optional[List[str]] = field(
+        default=None,
+        metadata={
+            "help": 'language pairs for text training, separated with ","'
+        },
+    )
+    speech_sample_ratio: float = field(
+        default=1,
+        metadata={
+            "help": "Multiple Ratio for speech dataset with transcripts"
+        },
+    )
+    text_sample_ratio: float = field(
+        default=1,
+        metadata={"help": "Multiple Ratio for text set"},
+    )
+    update_mix_data: bool = field(
+        default=False,
+        metadata={
+            "help": "use mixed data in one update when update-freq > 1"
+        },
+    )
+    load_speech_only: bool = field(
+        default=False,
+        metadata={"help": "load speech data only"},
+    )
+    mask_text_ratio: float = field(
+        default=0.0,
+        metadata={"help": "mask V source tokens for text only mode"},
+    )
+    mask_text_type: str = field(
+        default="random",
+        metadata={
+            "help": "mask text typed",
+            "choices": ["random", "tail"]
+        },
+    )
+    noise_token: str = field(
+        default="",
+        metadata={
+            "help": "noise token for masking src text tokens if mask-text-ratio > 0"
+        },
+    )
+    infer_target_lang: str = field(
+        default="",
+        metadata={"help": "target language for inference"},
+    )
 
-@register_task("speech_text_joint_to_text")
+
+
+@register_task("speech_text_joint_to_text", dataclass=SpeechTextJointToTextTaskConfig)
 class SpeechTextJointToTextTask(SpeechToTextTask):
     """
     Task for joint training speech and text to text.
     """
 
-    @classmethod
-    def add_args(cls, parser):
-        """Add task-specific arguments to the parser."""
-        super(SpeechTextJointToTextTask, cls).add_args(parser)
-        ###
-        parser.add_argument(
-            "--parallel-text-data",
-            default="",
-            help="path to parallel text data directory",
-        )
-        parser.add_argument(
-            "--max-tokens-text",
-            type=int,
-            metavar="N",
-            help="maximum tokens for encoder text input ",
-        )
-        parser.add_argument(
-            "--max-positions-text",
-            type=int,
-            metavar="N",
-            default=400,
-            help="maximum tokens for per encoder text input ",
-        )
-        parser.add_argument(
-            "--langpairs",
-            default=None,
-            metavar="S",
-            help='language pairs for text training, separated with ","',
-        )
-        parser.add_argument(
-            "--speech-sample-ratio",
-            default=1,
-            type=float,
-            metavar="N",
-            help="Multiple Ratio for speech dataset with transcripts ",
-        )
-        parser.add_argument(
-            "--text-sample-ratio",
-            default=1,
-            type=float,
-            metavar="N",
-            help="Multiple Ratio for text set ",
-        )
-        parser.add_argument(
-            "--update-mix-data",
-            action="store_true",
-            help="use mixed data in one update when update-freq  > 1",
-        )
-        parser.add_argument(
-            "--load-speech-only", action="store_true", help="load speech data only",
-        )
-        parser.add_argument(
-            "--mask-text-ratio",
-            type=float,
-            metavar="V",
-            default=0.0,
-            help="mask V source tokens for text only mode",
-        )
-        parser.add_argument(
-            "--mask-text-type",
-            default="random",
-            choices=["random", "tail"],
-            help="mask text typed",
-        )
-        parser.add_argument(
-            "--noise-token",
-            default="",
-            help="noise token for masking src text tokens if mask-text-ratio > 0",
-        )
-        parser.add_argument(
-            "--infer-target-lang",
-            default="",
-            metavar="S",
-            help="target language for inference",
-        )
-
-    def __init__(self, args, src_dict, tgt_dict, infer_tgt_lang_id=None):
-        super().__init__(args, tgt_dict)
+    def __init__(self, cfg, src_dict, tgt_dict, infer_tgt_lang_id=None):
+        super().__init__(cfg, tgt_dict)
         self.src_dict = src_dict
-        self.data_cfg = S2TJointDataConfig(Path(args.data) / args.config_yaml)
-        self.speech_only = args.load_speech_only
+        self.data_cfg = S2TJointDataConfig(Path(cfg.data) / cfg.config_yaml)
+        self.speech_only = cfg.load_speech_only
         self._infer_tgt_lang_id = infer_tgt_lang_id
 
     @classmethod
-    def setup_task(cls, args, **kwargs):
+    def setup_task(cls, cfg, **kwcfg):
         """Setup the task (e.g., load dictionaries)."""
-        data_cfg = S2TJointDataConfig(Path(args.data) / args.config_yaml)
-        tgt_dict_path = Path(args.data) / data_cfg.vocab_filename
-        src_dict_path = Path(args.data) / data_cfg.src_vocab_filename
+        data_cfg = S2TJointDataConfig(Path(cfg.data) / cfg.config_yaml)
+        tgt_dict_path = Path(cfg.data) / data_cfg.vocab_filename
+        src_dict_path = Path(cfg.data) / data_cfg.src_vocab_filename
         if (not os.path.isfile(src_dict_path)) or (not os.path.isfile(tgt_dict_path)):
-            raise FileNotFoundError("Dict not found: {}".format(args.data))
+            raise FileNotFoundError("Dict not found: {}".format(cfg.data))
         src_dict = Dictionary.load(src_dict_path.as_posix())
         tgt_dict = Dictionary.load(tgt_dict_path.as_posix())
 
         print("| src dictionary: {} types".format(len(src_dict)))
         print("| tgt dictionary: {} types".format(len(tgt_dict)))
 
-        if args.parallel_text_data != "":
-            if not os.path.isabs(args.parallel_text_data):
-                args.parallel_text_data = os.path.join(
-                    args.data, args.parallel_text_data
+        if cfg.parallel_text_data != "":
+            if not os.path.isabs(cfg.parallel_text_data):
+                cfg.parallel_text_data = os.path.join(
+                    cfg.data, cfg.parallel_text_data
                 )
 
-            if args.langpairs is None:
+            if cfg.langpairs is None:
                 raise Exception(
                     "Could not infer language pair, please provide it explicitly"
                 )
         infer_tgt_lang_id = None
-        if args.infer_target_lang != "" and data_cfg.prepend_tgt_lang_tag_no_change:
+        if cfg.infer_target_lang != "" and data_cfg.prepend_tgt_lang_tag_no_change:
             tgt_lang_tag = SpeechToTextDataset.LANG_TAG_TEMPLATE.format(
-                args.infer_target_lang
+                cfg.infer_target_lang
             )
             infer_tgt_lang_id = tgt_dict.index(tgt_lang_tag)
             assert infer_tgt_lang_id != tgt_dict.unk()
-        return cls(args, src_dict, tgt_dict, infer_tgt_lang_id=infer_tgt_lang_id)
+        return cls(cfg, src_dict, tgt_dict, infer_tgt_lang_id=infer_tgt_lang_id)
 
     def load_langpair_dataset(
         self, prepend_tgt_lang_tag=False, sampling_alpha=1.0, epoch=0
@@ -165,10 +154,10 @@ class SpeechTextJointToTextTask(SpeechToTextTask):
         lang_pairs = []
         text_dataset = None
         split = "train"
-        for lp in self.args.langpairs.split(","):
+        for lp in self.cfg.langpairs.split(","):
             src, tgt = lp.split("-")
             text_dataset = load_langpair_dataset(
-                self.args.parallel_text_data,
+                self.cfg.parallel_text_data,
                 split,
                 src,
                 self.src_dict,
@@ -179,8 +168,8 @@ class SpeechTextJointToTextTask(SpeechToTextTask):
                 upsample_primary=1,
                 left_pad_source=False,
                 left_pad_target=False,
-                max_source_positions=self.args.max_positions_text,
-                max_target_positions=self.args.max_target_positions,
+                max_source_positions=self.cfg.max_positions_text,
+                max_target_positions=self.cfg.max_target_positions,
                 load_alignments=False,
                 truncate_source=False,
             )
@@ -196,7 +185,7 @@ class SpeechTextJointToTextTask(SpeechToTextTask):
         if len(lang_pairs) > 1:
             if sampling_alpha != 1.0:
                 size_ratios = SpeechToTextDatasetCreator.get_size_ratios(
-                    self.args.langpairs.split(","),
+                    self.cfg.langpairs.split(","),
                     [len(s) for s in lang_pairs],
                     alpha=sampling_alpha,
                 )
@@ -219,27 +208,27 @@ class SpeechTextJointToTextTask(SpeechToTextTask):
                 bos_token=self._infer_tgt_lang_id,
             )
 
-    def build_src_tokenizer(self, args):
+    def build_src_tokenizer(self, cfg):
         logger.info(f"src-pre-tokenizer: {self.data_cfg.src_pre_tokenizer}")
         return encoders.build_tokenizer(Namespace(**self.data_cfg.src_pre_tokenizer))
 
-    def build_src_bpe(self, args):
+    def build_src_bpe(self, cfg):
         logger.info(f"tokenizer: {self.data_cfg.src_bpe_tokenizer}")
         return encoders.build_bpe(Namespace(**self.data_cfg.src_bpe_tokenizer))
 
-    def load_dataset(self, split, epoch=1, combine=False, **kwargs):
+    def load_dataset(self, split, epoch=1, combine=False, **kwcfg):
         """Load a given dataset split.
 
-        Args:
+        cfg:
             split (str): name of the split (e.g., train, valid, test)
         """
         is_train_split = split.startswith("train")
-        pre_tokenizer = self.build_tokenizer(self.args)
-        bpe_tokenizer = self.build_bpe(self.args)
-        src_pre_tokenizer = self.build_src_tokenizer(self.args)
-        src_bpe_tokenizer = self.build_src_bpe(self.args)
+        pre_tokenizer = self.build_tokenizer(self.cfg)
+        bpe_tokenizer = self.build_bpe(self.cfg)
+        src_pre_tokenizer = self.build_src_tokenizer(self.cfg)
+        src_bpe_tokenizer = self.build_src_bpe(self.cfg)
         ast_dataset = SpeechToTextJointDatasetCreator.from_tsv(
-            self.args.data,
+            self.cfg.data,
             self.data_cfg,
             split,
             self.tgt_dict,
@@ -250,28 +239,28 @@ class SpeechTextJointToTextTask(SpeechToTextTask):
             src_bpe_tokenizer=src_bpe_tokenizer,
             is_train_split=is_train_split,
             epoch=epoch,
-            seed=self.args.seed,
+            seed=self.cfg.seed,
         )
         noise_token_id = -1
         text_dataset = None
-        if self.args.parallel_text_data != "" and is_train_split:
+        if self.cfg.parallel_text_data != "" and is_train_split:
             text_dataset = self.load_langpair_dataset(
                 self.data_cfg.prepend_tgt_lang_tag_no_change, 1.0, epoch=epoch,
             )
-            if self.args.mask_text_ratio > 0:
+            if self.cfg.mask_text_ratio > 0:
                 # add mask
                 noise_token_id = (
                     self.src_dict.unk()
-                    if self.args.noise_token == ""
-                    else self.src_dict.index(self.args.noise_token)
+                    if self.cfg.noise_token == ""
+                    else self.src_dict.index(self.cfg.noise_token)
                 )
                 text_dataset = LangPairMaskDataset(
                     text_dataset,
                     src_bos=self.src_dict.bos(),
                     src_eos=self.src_dict.eos(),
                     noise_id=noise_token_id,
-                    mask_ratio=self.args.mask_text_ratio,
-                    mask_type=self.args.mask_text_type,
+                    mask_ratio=self.cfg.mask_text_ratio,
+                    mask_type=self.cfg.mask_text_type,
                 )
 
         if text_dataset is not None:
@@ -279,18 +268,18 @@ class SpeechTextJointToTextTask(SpeechToTextTask):
                 ModalityDatasetItem(
                     "sup_speech",
                     ast_dataset,
-                    (self.args.max_source_positions, self.args.max_target_positions),
-                    self.args.max_tokens,
-                    self.args.batch_size,
+                    (self.cfg.max_source_positions, self.cfg.max_target_positions),
+                    self.cfg.max_tokens,
+                    self.cfg.batch_size,
                 ),
                 ModalityDatasetItem(
                     "text",
                     text_dataset,
-                    (self.args.max_positions_text, self.args.max_target_positions),
-                    self.args.max_tokens_text
-                    if self.args.max_tokens_text is not None
-                    else self.args.max_tokens,
-                    self.args.batch_size,
+                    (self.cfg.max_positions_text, self.cfg.max_target_positions),
+                    self.cfg.max_tokens_text
+                    if self.cfg.max_tokens_text is not None
+                    else self.cfg.max_tokens,
+                    self.cfg.batch_size,
                 ),
             ]
             ast_dataset = MultiModalityDataset(mdsets)
@@ -347,7 +336,7 @@ class SpeechTextJointToTextTask(SpeechToTextTask):
                 update_epoch_batch_itr=update_epoch_batch_itr,
             )
 
-        mult_ratio = [self.args.speech_sample_ratio, self.args.text_sample_ratio]
+        mult_ratio = [self.cfg.speech_sample_ratio, self.cfg.text_sample_ratio]
         assert len(dataset.datasets) == 2
 
         # initialize the dataset with the correct starting epoch
@@ -367,7 +356,7 @@ class SpeechTextJointToTextTask(SpeechToTextTask):
             shard_id=shard_id,
             num_workers=num_workers,
             epoch=epoch,
-            mult_rate=1 if self.args.update_mix_data else max(self.args.update_freq),
+            mult_rate=1 if self.cfg.update_mix_data else max(self.cfg.update_freq),
             buffer_size=data_buffer_size,
             skip_remainder_batch=skip_remainder_batch,
         )
