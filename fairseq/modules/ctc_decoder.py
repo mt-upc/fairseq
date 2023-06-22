@@ -1,5 +1,7 @@
 import logging
 from dataclasses import dataclass, field
+from omegaconf import MISSING
+from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -13,42 +15,38 @@ from fairseq.modules import FairseqDropout, LayerNorm
 
 logger = logging.getLogger(__name__)
 
-
-def Linear(in_features, out_features, bias=True):
-    m = nn.Linear(in_features, out_features, bias)
-    nn.init.xavier_uniform_(m.weight)
-    logger.info(f"| bias in Linear layer: {bias}")
-    if bias:
-        nn.init.constant_(m.bias, 0.0)
-    return m
+@dataclass
+class CTCBasedCompressionConfig(FairseqDataclass):
+    type: str = field(
+        default="letter",
+        metadata={"help": "ctc-based compression type: letter or word"}
+    )
+    pooling_fn: str = field(
+        default="mean",
+        metadata={"help": "pooling function: max, mean, attention"}
+    )
 
 
 @dataclass
 class CTCDecoderConfig(FairseqDataclass):
-    embed_dim: int = field(default=1024, metadata={"help": "embedding dimension"})
+    embed_dim: int = field(
+        default=1024,
+        metadata={"help": "embedding dimension"}
+    )
+    dictionary_path: str = field(
+        default=MISSING, metadata={"help": "path to the ctc model dictionary for inference"}
+    )
     dropout_rate: float = field(
         default=0.0, metadata={"help": "dropout rate before the ctc projection layer"}
     )
-    ctc_compression: bool = field(
-        default=False, metadata={"help": "whether to use ctc-based compression"}
-    )
-    ctc_compression_type: str = field(
-        default="letter",
-        metadata={"help": "ctc-based compression type: letter or word"},
-    )
-    pooling_fn: str = field(
-        default="mean", metadata={"help": "pooling function: max, mean, attention"}
-    )
     layernorm: bool = field(
         default=False,
-        metadata={
-            "help": "whether to use layer normalization before ctc projection layer"
-        },
+        metadata={"help": "whether to use layer normalization before ctc projection layer"}
     )
-    dictionary_path: str = field(
-        default="", metadata={"help": "path to the ctc model dictionary for inference"}
+    ctc_compression: Optional[CTCBasedCompressionConfig] = field(
+        default=None,
+        metadata={"help": "ctc-based compression config"}
     )
-
 
 class CTCDecoder(FairseqDecoder):
     def __init__(self, cfg: CTCDecoderConfig):
@@ -72,11 +70,10 @@ class CTCDecoder(FairseqDecoder):
             self.layer_norm = LayerNorm(cfg.embed_dim)
 
         self.dropout_module = FairseqDropout(cfg.dropout_rate)
-        self.proj = Linear(cfg.embed_dim, len(dictionary), bias=True)
+        self.proj = nn.Linear(cfg.embed_dim, len(dictionary), bias=True)
 
         logger.info(f"| dictionary for CTC module: {len(dictionary)} types")
         logger.info(f"| CTC-based compression: {cfg.ctc_compression}")
-        logger.info(f"| CTC-based compression type: {cfg.ctc_compression_type}")
 
     def forward(self, speech_out):
         if (
@@ -97,19 +94,19 @@ class CTCDecoder(FairseqDecoder):
 
     def compress(self, decoder_out, speech_out):
         # TODO move the overlapping functionality here
-        if self.cfg.ctc_compression_type == "letter":
+        if self.cfg.ctc_compression.type == "letter":
             return self.compress_letter(decoder_out, speech_out)
-        elif self.cfg.ctc_compression_type == "word":
+        elif self.cfg.ctc_compression.type == "word":
             return self.compress_word(decoder_out, speech_out)
         else:
             raise NotImplementedError
 
     def pool(self, x):
-        if self.cfg.pooling_fn == "mean":
+        if self.cfg.ctc_compression.pooling_fn == "mean":
             return torch.mean(x, dim=0)
-        elif self.cfg.pooling_fn == "max":
+        elif self.cfg.ctc_compression.pooling_fn == "max":
             return torch.max(x, dim=0)[0]
-        elif self.cfg.pooling_fn == "attention":
+        elif self.cfg.ctc_compression.pooling_fn == "attention":
             raise NotImplementedError
 
     def compress_word(self, decoder_out, speech_out):
