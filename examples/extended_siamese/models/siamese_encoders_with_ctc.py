@@ -217,7 +217,7 @@ class SiameseSpeechTextEncoders(FairseqEncoder):
         model_args.decoder_layerdrop = 0.0
         
         text_encoder = TransformerEncoder(
-            model_args, src_dictionary, enc_emb
+            model_args, src_dictionary, enc_emb, return_ln=True
         )
         
         model_ckpt = {}
@@ -390,7 +390,14 @@ class SiameseSpeechTextEncoders(FairseqEncoder):
         else:
             padding_mask = None
 
+        if self.cfg.context_encoder.freeze:
+            if self.context_encoder.training:
+                self.context_encoder.eval()
+
         x = self.context_encoder(x, padding_mask)
+            
+        if isinstance(x, tuple):
+            x, ln_results = x
         x = x.transpose(0, 1)
 
         assert x.size(0) == speech_out[f"{key}_out"][0].size(0)
@@ -399,6 +406,7 @@ class SiameseSpeechTextEncoders(FairseqEncoder):
         speech_out["context_out"] = [x]
         speech_out["context_out_lengths"] = speech_out[f"{key}_out_lengths"]
         speech_out["context_padding_mask"] = speech_out[f"{key}_padding_mask"]
+        speech_out["context_ln_results"] = ln_results
         
         return speech_out
     
@@ -407,7 +415,7 @@ class SiameseSpeechTextEncoders(FairseqEncoder):
             return None
         if self.text_encoder.training:
             self.text_encoder.eval()
-        return self.text_encoder(src_txt_tokens, src_txt_lengths)
+        return self.text_encoder(src_txt_tokens, src_txt_lengths, return_all_hiddens=True)
     
     def _freeze_text_encoder(self):
         if hasattr(self, "text_encoder"):
@@ -448,6 +456,8 @@ class SiameseSpeechTextEncoders(FairseqEncoder):
             for n, p in self.context_encoder.named_parameters():
                 logger.info(f"- freezing {n}")
                 p.requires_grad = False
+            logger.info(f"Not freezing self_attn_layer_norm of first layer ...")
+            self.context_encoder.layers[0].self_attn_layer_norm.requires_grad = True
         # no need to deactivate dropout, it;s only gonna used during inference
 
 @register_model("siamese_encoders_with_ctc", dataclass=SiameseConfig)

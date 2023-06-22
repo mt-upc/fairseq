@@ -85,9 +85,8 @@ class CtcWassersteinCriterion(CtcCriterion):
         logging.info(f"ctc_weight = {self.ctc_weight}")
         logging.info(f"ot_weight = {self.ot_weight}")
         logging.info(f"ot_emb_weight = {self.ot_emb_weight}")
-        logging.info(
-            f"ot_loss = {self.ot_loss}, ot_p = {self.ot_p}, ot_blur = {self.ot_blur}, ot_scaling = {self.ot_scaling}"
-        )
+        logging.info(f"ot_pos_weight = {self.ot_pos_weight}")
+        logging.info(f"ot_loss = {self.ot_loss}, ot_p = {self.ot_p}, ot_blur = {self.ot_blur}, ot_scaling = {self.ot_scaling}")
 
         self.ot_loss = SamplesLoss(
             loss=cfg.ot_loss, p=self.ot_p, blur=self.ot_blur, scaling=self.ot_scaling
@@ -125,7 +124,7 @@ class CtcWassersteinCriterion(CtcCriterion):
             extra["wass_loss"] = wass_loss
 
         if self.ot_emb_weight > 0.0:
-            wass_emb_loss = self.compute_wass_loss(self.ot_loss, encoder_out, net_input, is_embedding=True)
+            wass_emb_loss = self.compute_wass_loss(self.ot_loss, encoder_out, net_input, lvl=0)
             loss += self.ot_emb_weight * wass_emb_loss
             extra["wass_emb_loss"] = wass_emb_loss
     
@@ -259,55 +258,47 @@ class CtcWassersteinCriterion(CtcCriterion):
             logging_output["c_total"] = c_len
         return logging_output
     
-    def _get_speech_repr(self, encoder_out, is_embedding=False):
+    def _get_speech_repr(self, encoder_out, lvl=-1):
         
-        if is_embedding:
-            if "modified_out" in encoder_out[0]:
-                key = "modified"
-            else:
-                key = "encoder"
+        if lvl == -1:
+            speech_out = encoder_out[0]["context_out"][0].transpose(0, 1)  # S x B x D
         else:
-            if "context_out" in encoder_out[0]:
-                key = "context"
-            elif "modified_out" in encoder_out[0]:
-                key = "modified"
-            else:
-                key = "encoder"
+            assert lvl in range(len(encoder_out[0]["context_ln_results"]))
+            speech_out = encoder_out[0]["context_ln_results"][lvl]  # S x B x D
             
-        speech_out = encoder_out[0][f"{key}_out"][0].transpose(0, 1) # S x B x D
-        speech_lens = encoder_out[0][f"{key}_out_lengths"][0] # torch.Size([B])
-        speech_padding_mask = encoder_out[0][f"{key}_padding_mask"][0] # B x S
+        speech_lens = encoder_out[0]["context_out_lengths"][0] # torch.Size([B])
+        speech_padding_mask = encoder_out[0]["context_padding_mask"][0] # B x S
         
         return speech_out, speech_lens, speech_padding_mask
     
-    def _get_text_repr(self, net_input, encoder_out, is_embedding=False):
+    def _get_text_repr(self, net_input, encoder_out, lvl=-1):
         
         if "src_txt_enc" in net_input:
-            if is_embedding:
-                text_out = net_input["src_txt_emb"].transpose(0, 1)
-            else:
+            if lvl == -1:
                 text_out = net_input["src_txt_enc"].transpose(0, 1) # T x B x D
+            else:
+                assert lvl in range(len(net_input["src_txt_ln_results"]))
+                text_out = net_input["src_txt_ln_results"][lvl].transpose(0, 1)  # T x B x D
+                
             text_lens = net_input["src_txt_lengths"] # torch.Size([B])
             text_padding_mask = lengths_to_padding_mask(text_lens) # B x T
         else:
-            if is_embedding:
-                text_out = encoder_out[1]["embed_src_tokens"][0]
-            else:
+            if lvl == -1:
                 text_out = encoder_out[1]["encoder_out"][0]  # T x B x D
+            else:
+                assert lvl in range(len(encoder_out[1]["ln_results"]))
+                text_out = encoder_out[1]["ln_results"][lvl]  # T x B x D
+
             text_lens = encoder_out[1]["src_lengths"][0].squeeze(-1) # torch.Size([B])
             text_padding_mask = encoder_out[1]["encoder_padding_mask"][0] # B x T
         
         return text_out, text_lens, text_padding_mask
 
-    def compute_wass_loss(self, ot_loss, encoder_out, net_input, is_embedding=False):
+    def compute_wass_loss(self, ot_loss, encoder_out, net_input, lvl=-1):
         
-        speech_out, speech_lens, speech_padding_mask = self._get_speech_repr(encoder_out, is_embedding)
-        text_out, text_lens, text_padding_mask = self._get_text_repr(net_input, encoder_out, is_embedding)
-        
-        if is_embedding:
-            speech_out = F.normalize(speech_out, p=2, dim=-1)
-            text_out = F.normalize(text_out, p=2, dim=-1)
-            
+        speech_out, speech_lens, speech_padding_mask = self._get_speech_repr(encoder_out, lvl)
+        text_out, text_lens, text_padding_mask = self._get_text_repr(net_input, encoder_out, lvl)
+
         S, B, _ = speech_out.size()
         T = text_out.size()[0]
         

@@ -80,7 +80,8 @@ class SpeechToTextJointDatasetItem(NamedTuple):
     tgt_alignment: Optional[torch.Tensor] = None
     id: Optional[str] = None
     src_txt_enc: Optional[torch.Tensor] = None
-    src_txt_emb: Optional[torch.Tensor] = None
+    src_txt_ln0: Optional[torch.Tensor] = None
+    src_txt_ln6: Optional[torch.Tensor] = None
 
 
 # use_src_lang_id:
@@ -135,15 +136,14 @@ class SpeechToTextJointDataset(SpeechToTextDataset):
         self.src_pre_tokenizer = src_pre_tokenizer
         self.src_bpe_tokenizer = src_bpe_tokenizer
         self.alignment = None
-        self.load_src_text = src_texts is not None and src_dict is not None
-        # self.load_src_text = src_texts is not None and src_dict is not None and src_text_reprs is not None
+        if all(x == "" for x in self.src_text_reprs):
+            self.src_text_reprs = None
+        self.load_src_text = src_texts is not None and src_dict is not None and self.src_text_reprs is None
         self.use_src_lang_id = use_src_lang_id
         if alignment is not None:
             self.alignment = [
                 [float(s) for s in sample.split()] for sample in alignment
             ]
-        if src_text_reprs is not None:
-            assert cfg.mt_model_name is not None
 
     def get_tokenized_src_text(self, index: int):
         text = self.tokenize(self.src_pre_tokenizer, self.src_texts[index])
@@ -171,11 +171,12 @@ class SpeechToTextJointDataset(SpeechToTextDataset):
         if self.alignment is not None:
             ali = torch.Tensor(self.alignment[index]).float()
             
-        src_txt_enc, src_txt_emb = None, None
+        src_txt_enc, src_txt_ln0, src_txt_ln6 = None, None, None
         if self.src_text_reprs is not None:
             repr = torch.load(self.src_text_reprs[index], map_location=torch.device("cpu"))
             src_txt_enc = repr["encoder_out"]
-            src_txt_emb = repr["embed_src_tokens"]
+            src_txt_ln0 = repr["ln_results0"]
+            src_txt_ln6 = repr["ln_results6"]
             
         return SpeechToTextJointDatasetItem(
             index=index,
@@ -187,13 +188,14 @@ class SpeechToTextJointDataset(SpeechToTextDataset):
             tgt_alignment=ali,
             id=s2t_dataset_item.id,
             src_txt_enc=src_txt_enc,
-            src_txt_emb=src_txt_emb
+            src_txt_ln0=src_txt_ln0,
+            src_txt_ln6=src_txt_ln6
         )
 
     def __len__(self):
         return self.n_samples
     
-    def collate_cached(self, enc: List[torch.Tensor], emb: List[torch.Tensor], order):
+    def collate_cached(self, enc: List[torch.Tensor], ln0: List[torch.Tensor] , ln6: List[torch.Tensor], order):
         enc = [enc[i] for i in order]
         lengths = torch.tensor([r.size(0) for r in enc], dtype=torch.long)
         max_len = lengths.max().item()
@@ -203,14 +205,21 @@ class SpeechToTextJointDataset(SpeechToTextDataset):
         for i, r in enumerate(enc):
             enc_collated[i, :r.size(0)] = r
             
-        emb_collated = None
-        if emb[0] is not None:
-            emb = [emb[i] for i in order]
-            emb_collated = torch.zeros(bs, max_len, dim, dtype=emb[0].dtype, device=emb[0].device)
-            for i, e in enumerate(emb):
-                emb_collated[i, :e.size(0)] = e
+        ln0_collated = None
+        if ln0[0] is not None:
+            ln0 = [ln0[i] for i in order]
+            ln0_collated = torch.zeros(bs, max_len, dim, dtype=ln0[0].dtype, device=ln0[0].device)
+            for i, e in enumerate(ln0):
+                ln0_collated[i, :e.size(0)] = e
+                
+        ln6_collated = None
+        if ln6[0] is not None:
+            ln6 = [ln6[i] for i in order]
+            ln6_collated = torch.zeros(bs, max_len, dim, dtype=ln6[0].dtype, device=ln6[0].device)
+            for i, e in enumerate(ln6):
+                ln6_collated[i, :e.size(0)] = e
 
-        return enc_collated, lengths, emb_collated
+        return enc_collated, lengths, ln0_collated, ln6_collated
         
         
     def collater(self, samples: List[SpeechToTextJointDatasetItem]) -> Dict:
@@ -251,14 +260,17 @@ class SpeechToTextJointDataset(SpeechToTextDataset):
             net_input["src_txt_lengths"] = src_txt_lengths
 
         if samples[0].src_txt_enc is not None:
-            src_txt_enc, src_txt_lengths, src_txt_emb = self.collate_cached(
+            src_txt_enc, src_txt_lengths, src_txt_ln0, src_txt_ln6 = self.collate_cached(
                 [x.src_txt_enc for x in samples],
-                [x.src_txt_emb for x in samples],
+                [x.src_txt_ln0 for x in samples],
+                [x.src_txt_ln6 for x in samples],
                 order
             )
             net_input["src_txt_enc"] = src_txt_enc
             net_input["src_txt_lengths"] = src_txt_lengths
-            net_input["src_txt_emb"] = src_txt_emb
+            net_input["src_txt_ln_results"] = [None for _ in range(12)]
+            net_input["src_txt_ln_results"][0] = src_txt_ln0
+            net_input["src_txt_ln_results"][6] = src_txt_ln6
         
         net_input["alignment"] = None
         if self.alignment is not None:

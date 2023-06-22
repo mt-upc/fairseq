@@ -35,12 +35,12 @@ class ContextEncoder(nn.Module):
         self.cfg = cfg
         self.dropout_module = FairseqDropout(cfg.dropout)
         self.layers = nn.ModuleList(
-            [TransformerEncoderLayerBase(cfg) for _ in range(cfg.encoder.layers)]
+            [TransformerEncoderLayerBase(cfg, return_ln=True) for _ in range(cfg.encoder.layers)]
         )
         self.normalize_before = cfg.encoder.normalize_before
         self.layer_norm = LayerNorm(cfg.encoder.embed_dim)
 
-    def forward(self, x, padding_mask: Optional[torch.Tensor]):
+    def forward(self, x, padding_mask: Optional[torch.Tensor]):     
         x = self.dropout_module(x)
 
         if padding_mask is not None:
@@ -49,10 +49,14 @@ class ContextEncoder(nn.Module):
         if not self.normalize_before:
             x = self.layer_norm(x)
 
+        ln_results = []
         for layer in self.layers:
             x = layer(x, padding_mask)
+            if layer.return_ln:
+                x, ln_result = x
+                ln_results.append(ln_result)
 
         if self.normalize_before:
             x = self.layer_norm(x)
 
-        return x
+        return x, ln_results
