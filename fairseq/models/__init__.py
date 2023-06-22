@@ -128,7 +128,7 @@ def register_model(name, dataclass=None):
 
     def register_model_cls(cls):
         if name in MODEL_REGISTRY:
-            raise ValueError("Cannot register duplicate model ({})".format(name))
+            return
         if not issubclass(cls, BaseFairseqModel):
             raise ValueError(
                 "Model ({}: {}) must extend BaseFairseqModel".format(name, cls.__name__)

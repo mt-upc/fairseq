@@ -62,10 +62,8 @@ def setup_registry(registry_name: str, base_class=None, default=None, required=F
 
     def register_x(name, dataclass=None):
         def register_x_cls(cls):
-            # if name in REGISTRY:
-            #     raise ValueError(
-            #         "Cannot register duplicate {} ({})".format(registry_name, name)
-            #     )
+            if name in REGISTRY:
+                return
             if cls.__name__ in REGISTRY_CLASS_NAMES:
                 raise ValueError(
                     "Cannot register {} with duplicate class name ({})".format(
