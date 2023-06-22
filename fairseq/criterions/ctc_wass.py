@@ -41,6 +41,10 @@ class CtcWassersteinCriterionConfig(CtcCriterionConfig):
         default=0.0,
         metadata={"help": "Weight for OT loss between the text embedding and output of the speech encoder"},
     )
+    ot_pos_weight: float = field(
+        default=1.0,
+        metadata={"help": "Weight for OT positional embeddings"},
+    )
     ot_loss: SAMPLE_LOSS_CHOICES = field(
         default="sinkhorn",
         metadata={"help": "type of distance measure between X_i and Y_j"},
@@ -56,10 +60,6 @@ class CtcWassersteinCriterionConfig(CtcCriterionConfig):
     ot_scaling: float = field(
         default=0.5,
         metadata={"help": "scaling in SampleLoss"},
-    )
-    ot_positional_weight: float = field(
-        default=1.0,
-        metadata={"help": "Weight for OT positional embeddings"},
     )
 
 @register_criterion(
@@ -79,7 +79,7 @@ class CtcWassersteinCriterion(CtcCriterion):
         self.ot_p = cfg.ot_p
         self.ot_blur = cfg.ot_blur
         self.ot_scaling = cfg.ot_scaling
-        self.ot_positional_weight = cfg.ot_positional_weight
+        self.ot_pos_weight = cfg.ot_pos_weight
 
         logging.info(f"*** Loss function ***")
         logging.info(f"ctc_weight = {self.ctc_weight}")
@@ -325,7 +325,7 @@ class CtcWassersteinCriterion(CtcCriterion):
         speech_out = speech_out.masked_fill(non_padding_speech.transpose(0, 1).unsqueeze(-1) == 0, 0.0)
         text_out = text_out.masked_fill(non_padding_text.transpose(0, 1).unsqueeze(-1) == 0, 0.0)
 
-        if self.ot_positional_weight > 0.0:
+        if self.ot_pos_weight > 0.0:
             # create tensor in which the elements are range of lengths
             speech_pos = torch.matmul(
                 torch.tensor(range(S), dtype=torch.float, device=speech_out.device).unsqueeze(-1), 
@@ -335,8 +335,8 @@ class CtcWassersteinCriterion(CtcCriterion):
                 torch.tensor(range(T), dtype=torch.float, device=speech_out.device).unsqueeze(-1), 
                 torch.ones((1, B), device=speech_out.device)
             ) # T x B
-            speech_pos = self.ot_positional_weight * speech_pos / (speech_lens - 1).unsqueeze(0) # S x B
-            text_pos = self.ot_positional_weight * text_pos / (text_lens - 1).unsqueeze(0) # T x B
+            speech_pos = self.ot_pos_weight * speech_pos / (speech_lens - 1).unsqueeze(0) # S x B
+            text_pos = self.ot_pos_weight * text_pos / (text_lens - 1).unsqueeze(0) # T x B
             speech_out = torch.cat((speech_out, speech_pos.unsqueeze(-1)), dim=-1)
             text_out = torch.cat((text_out, text_pos.unsqueeze(-1)), dim=-1)
 
