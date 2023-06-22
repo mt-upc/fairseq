@@ -53,7 +53,7 @@ from .positional_encoding import (
 from .adaptor import AdaptorConfig, Adaptor
 from .ctc_decoder import CTCDecoder, CTCDecoderConfig
 from .transformer_encoder_layers import TransformerEncoderLayers
-from .speech_embedder import Embedder, EmbedderConfig
+from .speech_embedder import SpeechEmbedder, SpeechEmbedderConfig
 
 __all__ = [
     "AdaptiveInput",
@@ -110,6 +110,6 @@ __all__ = [
     "CTCDecoder",
     "CTCDecoderConfig",
     "TransformerEncoderLayers",
-    "Embedder",
-    "EmbedderConfig",
+    "SpeechEmbedder",
+    "SpeechEmbedderConfig",
 ]
