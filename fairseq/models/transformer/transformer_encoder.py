@@ -46,7 +46,7 @@ class TransformerEncoderBase(FairseqEncoder):
         embed_tokens (torch.nn.Embedding): input embedding
     """
 
-    def __init__(self, cfg, dictionary, embed_tokens, return_fc=False):
+    def __init__(self, cfg, dictionary, embed_tokens, return_ln=False):
         self.cfg = cfg
         super().__init__(dictionary)
         self.register_buffer("version", torch.Tensor([3]))
@@ -55,7 +55,7 @@ class TransformerEncoderBase(FairseqEncoder):
             cfg.dropout, module_name=module_name_fordropout(self.__class__.__name__)
         )
         self.encoder_layerdrop = cfg.encoder.layerdrop
-        self.return_fc = return_fc
+        self.return_ln = return_ln
 
         embed_dim = embed_tokens.embedding_dim
         self.padding_idx = embed_tokens.padding_idx
@@ -105,7 +105,7 @@ class TransformerEncoderBase(FairseqEncoder):
 
     def build_encoder_layer(self, cfg):
         layer = transformer_layer.TransformerEncoderLayerBase(
-            cfg, return_fc=self.return_fc
+            cfg, return_ln=self.return_ln
         )
         checkpoint = cfg.checkpoint_activations
         if checkpoint:
@@ -216,7 +216,7 @@ class TransformerEncoderBase(FairseqEncoder):
         x = x.transpose(0, 1)
 
         encoder_states = []
-        fc_results = []
+        ln_results = []
 
         if return_all_hiddens:
             encoder_states.append(x)
@@ -228,15 +228,15 @@ class TransformerEncoderBase(FairseqEncoder):
             )
 
             if isinstance(lr, tuple) and len(lr) == 2:
-                x, fc_result = lr
+                x, ln_result = lr
             else:
                 x = lr
-                fc_result = None
+                ln_result = None
 
             if return_all_hiddens and not torch.jit.is_scripting():
                 assert encoder_states is not None
                 encoder_states.append(x)
-                fc_results.append(fc_result)
+                ln_results.append(ln_result)
 
         if self.layer_norm is not None:
             x = self.layer_norm(x)
@@ -256,7 +256,7 @@ class TransformerEncoderBase(FairseqEncoder):
             "encoder_padding_mask": [encoder_padding_mask],  # B x T
             "encoder_embedding": [encoder_embedding],  # B x T x C
             "encoder_states": encoder_states,  # List[T x B x C]
-            "fc_results": fc_results,  # List[T x B x C]
+            "ln_results": ln_results, # List[T x B x C]
             "src_tokens": [],
             "src_lengths": [src_lengths],
             "embed_src_tokens": [embed_src_tokens], # T x B x C
@@ -347,13 +347,13 @@ class TransformerEncoderBase(FairseqEncoder):
 
 
 class TransformerEncoder(TransformerEncoderBase):
-    def __init__(self, args, dictionary, embed_tokens, return_fc=False):
+    def __init__(self, args, dictionary, embed_tokens, return_ln=False):
         self.args = args
         super().__init__(
             TransformerConfig.from_namespace(args),
             dictionary,
             embed_tokens,
-            return_fc=return_fc,
+            return_ln=return_ln,
         )
 
     def build_encoder_layer(self, args):
