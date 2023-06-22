@@ -50,10 +50,10 @@ from .rotary_positional_embedding import RotaryPositionalEmbedding
 from .positional_encoding import (
     RelPositionalEncoding,
 )
-from .adaptor import AdaptorConfig, Adaptor
-from .ctc_decoder import CTCDecoder, CTCDecoderConfig
-from .transformer_encoder_layers import TransformerEncoderLayers
-from .speech_embedder import SpeechEmbedder, SpeechEmbedderConfig
+# from .adaptor import AdaptorConfig, Adaptor
+# from .ctc_decoder import CTCDecoder, CTCDecoderConfig
+# from .transformer_encoder_layers import TransformerEncoderLayers
+# from .speech_embedder import SpeechEmbedder, SpeechEmbedderConfig
 
 __all__ = [
     "AdaptiveInput",
@@ -105,11 +105,11 @@ __all__ = [
     "RelPositionalEncoding",
     "RotaryPositionalEmbedding",
     "RotaryPositionMultiHeadedAttention",
-    "AdaptorConfig",
-    "Adaptor",
-    "CTCDecoder",
-    "CTCDecoderConfig",
-    "TransformerEncoderLayers",
-    "SpeechEmbedder",
-    "SpeechEmbedderConfig",
+    # "AdaptorConfig",
+    # "Adaptor",
+    # "CTCDecoder",
+    # "CTCDecoderConfig",
+    # "TransformerEncoderLayers",
+    # "SpeechEmbedder",
+    # "SpeechEmbedderConfig",
 ]

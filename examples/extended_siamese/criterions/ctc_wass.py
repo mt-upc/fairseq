@@ -63,7 +63,7 @@ class CtcWassersteinCriterionConfig(CtcCriterionConfig):
     )
 
 @register_criterion(
-    "ctc_wass_loss", dataclass=CtcWassersteinCriterionConfig
+    "ctc_wass", dataclass=CtcWassersteinCriterionConfig
 )
 class CtcWassersteinCriterion(CtcCriterion):
     def __init__(self, cfg: CtcWassersteinCriterionConfig, task: FairseqTask):

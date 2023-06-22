@@ -1,0 +1,1 @@
+from .ctc_wass import CtcWassersteinCriterion

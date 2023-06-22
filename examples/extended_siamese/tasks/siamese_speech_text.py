@@ -52,10 +52,7 @@ class SiameseSpeechTextTask(SpeechTextJointToTextTask):
         tgt_dict = Dictionary.load(tgt_dict_path.as_posix())
 
         # correct the ctc dictionary
-        tgt_dict.symbols[0], tgt_dict.symbols[1] = (
-            tgt_dict.symbols[1],
-            tgt_dict.symbols[0],
-        )
+        tgt_dict.symbols[0], tgt_dict.symbols[1] = tgt_dict.symbols[1], tgt_dict.symbols[0],
         tgt_dict.indices["<s>"], tgt_dict.indices["<pad>"] = 1, 0
         tgt_dict.bos_index, tgt_dict.pad_index = 1, 0
 

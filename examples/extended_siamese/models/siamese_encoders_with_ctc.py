@@ -22,16 +22,16 @@ from fairseq.models import (
 )
 from fairseq.models.transformer import Embedding, TransformerEncoder, TransformerDecoder
 from fairseq.models.wav2vec import Wav2VecEncoder
-from fairseq.modules import (
+from examples.extended_siamese.modules import (
     CTCDecoder,
     CTCDecoderConfig,
     Adaptor,
     AdaptorConfig,
-    TransformerEncoderLayers,
+    ContextEncoder,
+    ContextEncoderConfig,
     SpeechEmbedder,
     SpeechEmbedderConfig
 )
-from fairseq.models.transformer.transformer_config import TransformerConfig
 
 from omegaconf import OmegaConf
 
@@ -116,25 +116,6 @@ class TextEncoderConfig(FairseqDataclass):
         metadata={"help": "do not use text encoder."
                   "Remove it after loading the model to construct the speech embedder and context encoder"}
         )
-    
-@dataclass
-class ContextEncoderConfig(TransformerConfig):
-    dropout: float = field(
-        default=0.0,
-        metadata={"help": "context encoder dropout"}
-    )
-    activation_dropout: float = field(
-        default=0.0,
-        metadata={"help": "context encoder activation dropout"}
-    )
-    attention_dropout: float = field(
-        default=0.0,
-        metadata={"help": "context encoder attention dropout"}
-    )
-    freeze: bool = field(
-        default=False,
-        metadata={"help": "freeze context encoder"}
-    )
 
 @dataclass
 class SiameseConfig(FairseqDataclass):
@@ -255,7 +236,7 @@ class SiameseSpeechTextEncoders(FairseqEncoder):
         return text_encoder
     
     @classmethod
-    def build_context_encoder(cls, cfg: TransformerConfig, text_encoder):
+    def build_context_encoder(cls, cfg: ContextEncoderConfig, text_encoder):
 
         cfg.encoder.embed_dim = text_encoder.cfg.encoder.embed_dim
         cfg.encoder.ffn_embed_dim = text_encoder.cfg.encoder.ffn_embed_dim
@@ -264,7 +245,7 @@ class SiameseSpeechTextEncoders(FairseqEncoder):
         cfg.encoder.attention_heads = text_encoder.cfg.encoder.attention_heads
         cfg.encoder.layers = text_encoder.cfg.encoder.layers
         
-        context_encoder = TransformerEncoderLayers(cfg)
+        context_encoder = ContextEncoder(cfg)
 
         context_encoder.layers.load_state_dict(text_encoder.layers.state_dict())
         if hasattr(text_encoder, "layer_norm"):
@@ -309,6 +290,35 @@ class SiameseSpeechTextEncoders(FairseqEncoder):
     def forward(self, src_tokens, src_lengths, src_txt_tokens, src_txt_lengths):
         raise NotImplementedError("Please use the forward submethods from the main model")
     
+    def forward_speech(self, src_tokens, src_lengths):
+        padding_mask = lengths_to_padding_mask(src_lengths)
+        
+        w2v_args = {
+            "source": src_tokens,
+            "padding_mask": padding_mask,
+            "mask": self.spch_encoder.apply_mask and self.spch_encoder.training,
+        }
+        
+        res = self.spch_encoder.w2v_model.extract_features(**w2v_args)
+
+        padding_mask = res["padding_mask"]
+        if padding_mask is not None:
+            output_lengths = (1 - padding_mask.int()).sum(dim=1)
+        else:
+            B, T, _ = res["x"].size()
+            output_lengths = (torch.ones(B, device=res["x"].device) * T).long()
+            
+        return {
+            "encoder_out": [res["x"]],  # B x T x C
+            "encoder_padding_mask": [padding_mask], # B x T
+            "encoder_embedding": [],  # B x T x C
+            "encoder_states": [],  # List[T x B x C]
+            "src_tokens": [],
+            "src_lengths": [],
+            "encoder_out_lengths": [output_lengths],
+            "ctc_layer_result": res["layer_results"][self.ctc_layer_id] if self.ctc_layer_id != -1 else None,
+        }
+        
     def forward_adaptor(self, speech_out):
         
         if not hasattr(self, "adaptor"):
@@ -339,63 +349,7 @@ class SiameseSpeechTextEncoders(FairseqEncoder):
         speech_out["modified_out_lengths"] = [output_lengths]
         
         return speech_out
-    
-    def forward_speech(self, src_tokens, src_lengths):
-        padding_mask = lengths_to_padding_mask(src_lengths)
-        
-        w2v_args = {
-            "source": src_tokens,
-            "padding_mask": padding_mask,
-            "mask": self.spch_encoder.apply_mask and self.spch_encoder.training,
-        }
-        
-        res = self.spch_encoder.w2v_model.extract_features(**w2v_args)
 
-        padding_mask = res["padding_mask"]
-        if padding_mask is not None:
-            output_lengths = (1 - padding_mask.int()).sum(dim=1)
-        else:
-            B, T, _ = res["x"].size()
-            output_lengths = (torch.ones(B, device=res["x"].device) * T).long()
-            
-        return {
-            "encoder_out": [res["x"]],  # B x T x C
-            "encoder_padding_mask": [padding_mask], # B x T
-            "encoder_embedding": [],  # B x T x C
-            "encoder_states": [],  # List[T x B x C]
-            "src_tokens": [],
-            "src_lengths": [],
-            "encoder_out_lengths": [output_lengths],
-            "ctc_layer_result": res["layer_results"][self.ctc_layer_id] if self.ctc_layer_id != -1 else None,
-        }
-        
-    def forward_context(self, speech_out):
-        if not hasattr(self, "context_encoder"):
-            return speech_out
-        
-        if "modified_out" in speech_out:
-            key = "modified"
-        else:
-            key = "encoder"
-        
-        x = speech_out[f"{key}_out"][0].transpose(0, 1)
-        if speech_out[f"{key}_padding_mask"][0] is not None:
-            padding_mask = speech_out[f"{key}_padding_mask"][0]
-        else:
-            padding_mask = None
-
-        x = self.context_encoder(x, padding_mask)
-        x = x.transpose(0, 1)
-
-        assert x.size(0) == speech_out[f"{key}_out"][0].size(0)
-        if padding_mask is not None:
-            assert padding_mask.size(0) == speech_out[f"{key}_out"][0].size(0)
-        speech_out["context_out"] = [x]
-        speech_out["context_out_lengths"] = speech_out[f"{key}_out_lengths"]
-        speech_out["context_padding_mask"] = speech_out[f"{key}_padding_mask"]
-        
-        return speech_out
-    
     def forward_embedder(self, speech_out):
         if not hasattr(self, "speech_embedder"):
             return speech_out
@@ -421,6 +375,33 @@ class SiameseSpeechTextEncoders(FairseqEncoder):
         speech_out["modified_out"] = [x]
         speech_out["modified_out_lengths"] = [lengths]
         speech_out["modified_padding_mask"] = [padding_mask]
+        
+        return speech_out
+    
+    def forward_context(self, speech_out):
+        if not hasattr(self, "context_encoder"):
+            return speech_out
+        
+        if "modified_out" in speech_out:
+            key = "modified"
+        else:
+            key = "encoder"
+        
+        x = speech_out[f"{key}_out"][0].transpose(0, 1)
+        if speech_out[f"{key}_padding_mask"][0] is not None:
+            padding_mask = speech_out[f"{key}_padding_mask"][0]
+        else:
+            padding_mask = None
+
+        x = self.context_encoder(x, padding_mask)
+        x = x.transpose(0, 1)
+
+        assert x.size(0) == speech_out[f"{key}_out"][0].size(0)
+        if padding_mask is not None:
+            assert padding_mask.size(0) == speech_out[f"{key}_out"][0].size(0)
+        speech_out["context_out"] = [x]
+        speech_out["context_out_lengths"] = speech_out[f"{key}_out_lengths"]
+        speech_out["context_padding_mask"] = speech_out[f"{key}_padding_mask"]
         
         return speech_out
     

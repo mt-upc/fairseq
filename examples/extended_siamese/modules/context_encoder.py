@@ -1,4 +1,5 @@
 from typing import Optional
+from dataclasses import dataclass, field
 
 import torch
 import torch.nn as nn
@@ -7,9 +8,28 @@ from fairseq.models.transformer.transformer_config import TransformerConfig
 from fairseq.modules import LayerNorm, FairseqDropout
 from fairseq.modules.transformer_layer import TransformerEncoderLayerBase
 
+    
+@dataclass
+class ContextEncoderConfig(TransformerConfig):
+    dropout: float = field(
+        default=0.0,
+        metadata={"help": "context encoder dropout"}
+    )
+    activation_dropout: float = field(
+        default=0.0,
+        metadata={"help": "context encoder activation dropout"}
+    )
+    attention_dropout: float = field(
+        default=0.0,
+        metadata={"help": "context encoder attention dropout"}
+    )
+    freeze: bool = field(
+        default=False,
+        metadata={"help": "freeze context encoder"}
+    )
 
-class TransformerEncoderLayers(nn.Module):
-    def __init__(self, cfg: TransformerConfig):
+class ContextEncoder(nn.Module):
+    def __init__(self, cfg: ContextEncoderConfig):
         super().__init__()
 
         self.cfg = cfg
