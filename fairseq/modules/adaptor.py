@@ -19,7 +19,7 @@ class AdaptorConfig(FairseqDataclass):
         metadata={"help": "dimension of the Adaptor"}
     )
     num_layers: int = field(
-        default=1,
+        default=0,
         metadata={"help": "# of Adaptor layers"}
     )
     kernel_size: int = field(
@@ -86,7 +86,7 @@ class Adaptor(nn.Module):
                 stride=cfg.stride,
                 padding=cfg.kernel_size // 2,
             )
-            for i in range(cfg.num_layers)
+            for _ in range(cfg.num_layers)
         )
         self.conv1d_layer_norm = LayerNorm(cfg.embed_dim)
         self.activation_fn = partial(nn.functional.glu, dim=1) \
