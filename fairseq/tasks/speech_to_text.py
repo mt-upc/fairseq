@@ -19,7 +19,6 @@ from fairseq.data.audio.speech_to_text_dataset import (
     SpeechToTextDatasetCreator,
     get_features_or_waveform,
 )
-from fairseq.data.audio.speech_distillation_dataset import SpeechDistillationDataset
 
 from fairseq.dataclass import FairseqDataclass
 from fairseq.dataclass.configs import GenerationConfig
@@ -33,19 +32,12 @@ EVAL_BLEU_ORDER=4
 logger = logging.getLogger(__name__)
 
 @dataclass
-class KnowledgeDistillationConfig(FairseqDataclass):
-    path: str = field(
-        default="",
-        metadata={"help": "path to teacher outputs: ${path}/${split}/*.pt"}
-    )
-
-@dataclass
 class SpeechToTextTaskConfig(FairseqDataclass):
     data: str = field(
         default=MISSING,
         metadata={"help": "manifest root path"}
     )
-    data_config_yaml: str = field(
+    config_yaml: str = field(
         default="config.yaml",
         metadata={"help": "Configuration YAML filename (under manifest root)"}
     )
@@ -87,10 +79,6 @@ class SpeechToTextTaskConfig(FairseqDataclass):
     # Inherit from other configs
     train_subset: str = II("dataset.train_subset")
     seed: int = II("common.seed")
-    knowledge_distillation: Optional[KnowledgeDistillationConfig] = field(
-        default=None,
-        metadata={"help": "Knowledge distillation arguments"}
-    )
     sampling_ratios: str = field(
         default="1",
         metadata={"help": "sampling ratios of the train subsets"}
@@ -112,7 +100,7 @@ class SpeechToTextTask(FairseqTask):
         super().__init__(cfg)
         self.tgt_dict = tgt_dict
         try:
-            self.data_cfg = S2TDataConfig(Path(cfg.data) / cfg.data_config_yaml)
+            self.data_cfg = S2TDataConfig(Path(cfg.data) / cfg.config_yaml)
         except AttributeError:
             # compatibility with siamese pre-training
             self.data_cfg = S2TDataConfig(Path(cfg.data) / cfg.config_yaml)
@@ -136,8 +124,6 @@ class SpeechToTextTask(FairseqTask):
         self.sampling_ratios = None
         if getattr(cfg, "sampling_ratios", None) is not None:
             self.sampling_ratios = list(map(float, cfg.sampling_ratios.split(",")))
-        
-        self.use_kd = getattr(cfg, "knowledge_distillation", None) is not None and cfg.knowledge_distillation != ""
 
     def _get_speaker_to_id(self):
         speaker_to_id = None
@@ -150,7 +136,7 @@ class SpeechToTextTask(FairseqTask):
 
     @classmethod
     def setup_task(cls, cfg, **kwargs):
-        data_cfg = S2TDataConfig(Path(cfg.data) / cfg.data_config_yaml)
+        data_cfg = S2TDataConfig(Path(cfg.data) / cfg.config_yaml)
         dict_path = Path(data_cfg.vocab_filename)
         if not dict_path.is_file():
             raise FileNotFoundError(f"Dict not found: {dict_path.as_posix()}")
@@ -190,13 +176,6 @@ class SpeechToTextTask(FairseqTask):
             speaker_to_id=self.speaker_to_id,
             sampling_ratios=self.sampling_ratios,
         )
-        
-        if is_train_split and self.use_kd:
-            self.datasets[split] = SpeechDistillationDataset(
-                self.datasets[split],
-                self.cfg.knowledge_distillation.path,
-                pad_idx=self.tgt_dict.pad()
-            )
 
     @property
     def target_dictionary(self):
@@ -217,11 +196,6 @@ class SpeechToTextTask(FairseqTask):
                 [model],
                 self.cfg.eval_gen_config
             )
-            # Trick: update model configuration globally
-            if not safe_hasattr(cfg.encoder, 'pre_args'):
-                cfg.encoder.pre_args = model.encoder.cfg_.pre_args
-            if not safe_hasattr(cfg.decoder, 'pre_args'):
-                cfg.decoder.pre_args = model.decoder.cfg_.pre_args
 
         return model
 
