@@ -52,11 +52,11 @@ class CtcWassersteinCriterionConfig(CtcCriterionConfig):
     ot_loss: SAMPLE_LOSS_CHOICES = field(
         default="sinkhorn",
         metadata={"help": "type of distance measure between X_i and Y_j"},
-    )
+    ) # TODO change this to energy
     ot_p: int = field(
         default=2,
         metadata={"help": "p in SampleLoss"},
-    )
+    ) # TODO change this to 1
     ot_blur: float = field(
         default=0.05,
         metadata={"help": "blur in SampleLoss"},
