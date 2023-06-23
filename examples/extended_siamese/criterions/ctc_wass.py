@@ -41,6 +41,10 @@ class CtcWassersteinCriterionConfig(CtcCriterionConfig):
         default=0.0,
         metadata={"help": "Weight for OT loss between the text embedding and output of the speech encoder"},
     )
+    ot_mid_weight: float = field(
+        default=0.0,
+        metadata={"help": "Weight for OT loss between the 6th (middle) layer of each encoder"},
+    )
     ot_pos_weight: float = field(
         default=1.0,
         metadata={"help": "Weight for OT positional embeddings"},
@@ -74,6 +78,7 @@ class CtcWassersteinCriterion(CtcCriterion):
         self.ctc_weight = cfg.ctc_weight
         self.ot_weight = cfg.ot_weight
         self.ot_emb_weight = cfg.ot_emb_weight
+        self.ot_mid_weight = cfg.ot_mid_weight
 
         self.ot_loss = cfg.ot_loss
         self.ot_p = cfg.ot_p
@@ -85,6 +90,7 @@ class CtcWassersteinCriterion(CtcCriterion):
         logging.info(f"ctc_weight = {self.ctc_weight}")
         logging.info(f"ot_weight = {self.ot_weight}")
         logging.info(f"ot_emb_weight = {self.ot_emb_weight}")
+        logging.info(f"ot_mid_weight = {self.ot_mid_weight}")
         logging.info(f"ot_pos_weight = {self.ot_pos_weight}")
         logging.info(f"ot_loss = {self.ot_loss}, ot_p = {self.ot_p}, ot_blur = {self.ot_blur}, ot_scaling = {self.ot_scaling}")
 
@@ -105,7 +111,7 @@ class CtcWassersteinCriterion(CtcCriterion):
         )
 
         loss = 0.0
-        extra = {"ctc_loss": 0.0, "wass_loss": 0.0, "wass_emb_loss": 0.0}
+        extra = {"ctc_loss": 0.0, "wass_loss": 0.0, "wass_emb_loss": 0.0, "wass_mid_loss": 0.0}
 
         if self.ctc_weight > 0.0:
             ctc_loss, extra = self.compute_ctc_loss(
@@ -127,6 +133,11 @@ class CtcWassersteinCriterion(CtcCriterion):
             wass_emb_loss = self.compute_wass_loss(self.ot_loss, encoder_out, net_input, lvl=0)
             loss += self.ot_emb_weight * wass_emb_loss
             extra["wass_emb_loss"] = wass_emb_loss
+            
+        if self.ot_mid_weight > 0.0:
+            wass_mid_loss = self.compute_wass_loss(self.ot_loss, encoder_out, net_input, lvl=6)
+            loss += self.ot_mid_weight * wass_mid_loss
+            extra["wass_mid_loss"] = wass_mid_loss
     
         logging_output = {
             "loss": utils.item(loss.data)
@@ -140,6 +151,9 @@ class CtcWassersteinCriterion(CtcCriterion):
             else 0.0,
             "wass_emb_loss": utils.item(extra["wass_emb_loss"].data)
             if extra["wass_emb_loss"] != 0.0
+            else 0.0,
+            "wass_mid_loss": utils.item(extra["wass_mid_loss"].data)
+            if extra["wass_mid_loss"] != 0.0
             else 0.0,
             "ntokens": sample["ntokens"],
             "nsentences": sample["id"].numel(),
@@ -328,8 +342,8 @@ class CtcWassersteinCriterion(CtcCriterion):
             ) # T x B
             speech_pos = self.ot_pos_weight * speech_pos / (speech_lens - 1).unsqueeze(0) # S x B
             text_pos = self.ot_pos_weight * text_pos / (text_lens - 1).unsqueeze(0) # T x B
-            speech_out = torch.cat((speech_out, speech_pos.unsqueeze(-1)), dim=-1)
-            text_out = torch.cat((text_out, text_pos.unsqueeze(-1)), dim=-1)
+            speech_out = torch.cat((speech_out, speech_pos.unsqueeze(-1)), dim=-1) # S x B x D+1
+            text_out = torch.cat((text_out, text_pos.unsqueeze(-1)), dim=-1) # T x B x D+1
 
         speech_weights = (
             torch.ones_like(non_padding_speech) / 
@@ -366,6 +380,9 @@ class CtcWassersteinCriterion(CtcCriterion):
         wass_emb_loss_sum = utils.item(
             sum(log.get("wass_emb_loss", 0) for log in logging_outputs)
         )
+        wass_mid_loss_sum = utils.item(
+            sum(log.get("wass_mid_loss", 0) for log in logging_outputs)
+        )
         ntokens = utils.item(sum(log.get("ntokens", 0) for log in logging_outputs))
 
         nsentences = utils.item(
@@ -399,6 +416,13 @@ class CtcWassersteinCriterion(CtcCriterion):
             metrics.log_scalar(
                 "wass_emb_loss",
                 wass_emb_loss_sum / sample_size / math.log(2),
+                sample_size,
+                round=3,
+            )
+        if wass_mid_loss_sum != 0:
+            metrics.log_scalar(
+                "wass_mid_loss",
+                wass_mid_loss_sum / sample_size / math.log(2),
                 sample_size,
                 round=3,
             )
