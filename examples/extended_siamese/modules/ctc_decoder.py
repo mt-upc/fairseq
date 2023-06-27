@@ -165,38 +165,47 @@ class CTCDecoder(FairseqDecoder):
     
     def compress_letter(self, decoder_out, speech_out):
         x = speech_out["encoder_out"][0].transpose(0, 1)  # T x B x D
-        prev_lengths = speech_out["encoder_out_lengths"][0]
+        prev_lengths = speech_out["encoder_out_lengths"][0] # B
 
         with torch.no_grad():
             lprobs_ctc = F.log_softmax(decoder_out[0], dim=-1)  # T x B x V
             preds = torch.argmax(lprobs_ctc, dim=-1)  # T x B
 
-        _, B, D = x.size()
-        x = x.transpose(0, 1)
-        preds = preds.transpose(0, 1)
+        T, B, D = x.size()
+        x = x.transpose(0, 1) # B x T x D
+        preds = preds.transpose(0, 1) # B x T
 
-        t = (preds != self.blank_idx).sum(dim=-1).max().item()
-        if not t:
-            t = 1 # for rare case where whole batch is blank
-        x_compr = torch.zeros(B, t, D, device=x.device, dtype=x.dtype)
-        lengths_compr = torch.zeros(B, device=x.device, dtype=torch.long)
-        valid_examples = torch.zeros(B, device=x.device, dtype=torch.bool)
+        # max number of non-blank tokens in a batch of sequences
+        N = (preds != self.blank_idx).sum(dim=-1).max().item()
+        if not N:
+            N = 1 # for rare case where whole batch is blank
+        
+        # create the compressed sequence with N positions
+        # will be further reduced after getting the actual lengths
+        x_compr = torch.zeros(B, N, D, device=x.device, dtype=x.dtype) # B x N x D
+        lengths_compr = torch.zeros(B, device=x.device, dtype=torch.long) # B
+        valid_examples = torch.zeros(B, device=x.device, dtype=torch.bool) # B
 
         for i in range(B):
+            # p: compressed sequence, [N_i]
+            # c: repeating counts for each j element of p, [N_i]
             p, c = preds[i].unique_consecutive(return_counts=True)
-            valid_mask_i = p != self.blank_idx
-            x_splt = torch.split(x[i], c.tolist())
-            out = torch.stack([t.mean(dim=0) for t in x_splt])
+            valid_mask_i = p != self.blank_idx # [N_i]
+            x_splt = torch.split(x[i], c.tolist()) # Tuple[tensor] of size N_i, x_splt[0] is the first c[0] elements of x[i]
+            out = torch.stack([self.pool(t) for t in x_splt]) # N_i x D
             if not valid_mask_i.any():
                 # empty examples have just one blank
                 x_compr[i, :1] = out
                 lengths_compr[i] = 1
             else:
-                out = out[valid_mask_i]
+                # remove blank tokens
+                out = out[valid_mask_i] # N_i' x D
+
                 x_compr[i, :out.size(0)] = out
                 lengths_compr[i] = out.size(0)
                 valid_examples[i] = True
 
+        # real max length after removing blanks
         max_length = lengths_compr.max().item()
 
         x_compr = x_compr[:, :max_length]
