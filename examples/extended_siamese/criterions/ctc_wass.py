@@ -350,9 +350,9 @@ class CtcWassersteinCriterion(CtcCriterion):
             speech_weights = torch.ones_like(speech_padding_mask) / speech_lens.unsqueeze(-1) # B x S
             text_weights = torch.ones_like(text_padding_mask) / text_lens.unsqueeze(-1) # B x T
         elif self.ot_distribution == "norm":
-            speech_norm = torch.norm(speech_out.transpose(0, 1), dim=-1) # B x S
+            speech_norm = torch.norm(speech_out.detach().transpose(0, 1), dim=-1) # B x S
             speech_weights = speech_norm / speech_norm.sum(dim=-1, keepdim=True) # B x S
-            text_norm = torch.norm(text_out.transpose(0, 1), dim=-1) # B x T
+            text_norm = torch.norm(text_out.detach().transpose(0, 1), dim=-1) # B x T
             text_weights = text_norm / text_norm.sum(dim=-1, keepdim=True) # B x T
         # zero weights for padding
         speech_weights.masked_fill_(speech_padding_mask, 0.0)
