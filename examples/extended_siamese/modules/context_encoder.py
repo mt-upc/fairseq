@@ -29,13 +29,13 @@ class ContextEncoderConfig(TransformerConfig):
     )
 
 class ContextEncoder(nn.Module):
-    def __init__(self, cfg: ContextEncoderConfig):
+    def __init__(self, cfg: ContextEncoderConfig, return_ln=False):
         super().__init__()
 
         self.cfg = cfg
         self.dropout_module = FairseqDropout(cfg.dropout)
         self.layers = nn.ModuleList(
-            [TransformerEncoderLayerBase(cfg, return_ln=True) for _ in range(cfg.encoder.layers)]
+            [TransformerEncoderLayerBase(cfg, return_ln=return_ln) for _ in range(cfg.encoder.layers)]
         )
         self.normalize_before = cfg.encoder.normalize_before
         self.layer_norm = LayerNorm(cfg.encoder.embed_dim)

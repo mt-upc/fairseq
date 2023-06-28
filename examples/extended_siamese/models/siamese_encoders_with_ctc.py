@@ -242,7 +242,7 @@ class SiameseSpeechTextEncoders(FairseqEncoder):
         cfg.encoder.attention_heads = text_encoder.cfg.encoder.attention_heads
         cfg.encoder.layers = text_encoder.cfg.encoder.layers
         
-        context_encoder = ContextEncoder(cfg)
+        context_encoder = ContextEncoder(cfg, return_ln=True)
 
         context_encoder.layers.load_state_dict(text_encoder.layers.state_dict())
         if hasattr(text_encoder, "layer_norm"):
