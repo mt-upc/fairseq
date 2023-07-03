@@ -77,22 +77,23 @@ class Adaptor(nn.Module):
             )
         self.dropout = FairseqDropout(cfg.dropout)
 
-        dim_factor = 2 if cfg.activation_fn == 'glu' else 1
-        self.layers = nn.ModuleList(
-            nn.Conv1d(
-                cfg.embed_dim,
-                cfg.embed_dim * dim_factor,
-                cfg.kernel_size,
-                stride=cfg.stride,
-                padding=cfg.kernel_size // 2,
+        if cfg.num_layers > 0:
+            dim_factor = 2 if cfg.activation_fn == 'glu' else 1
+            self.layers = nn.ModuleList(
+                nn.Conv1d(
+                    cfg.embed_dim,
+                    cfg.embed_dim * dim_factor,
+                    cfg.kernel_size,
+                    stride=cfg.stride,
+                    padding=cfg.kernel_size // 2,
+                )
+                for _ in range(cfg.num_layers)
             )
-            for _ in range(cfg.num_layers)
-        )
-        self.conv1d_layer_norm = LayerNorm(cfg.embed_dim)
-        self.activation_fn = partial(nn.functional.glu, dim=1) \
-            if cfg.activation_fn == 'glu' else \
-            utils.get_activation_fn(cfg.activation_fn)
-        self.stride = cfg.stride
+            self.conv1d_layer_norm = LayerNorm(cfg.embed_dim)
+            self.activation_fn = partial(nn.functional.glu, dim=1) \
+                if cfg.activation_fn == 'glu' else \
+                utils.get_activation_fn(cfg.activation_fn)
+            self.stride = cfg.stride
         
         self.final_layer_norm = LayerNorm(cfg.embed_dim) if cfg.use_final_layer_norm else None
 
@@ -101,34 +102,38 @@ class Adaptor(nn.Module):
         if self.pre_proj is not None:
             x = x + self.dropout(self.pre_proj(x))
 
-        if padding_mask is not None:
-            x = utils.index_put(x, padding_mask.T, 0)
-            
-        x = self.conv1d_layer_norm(x)
-
-        # T x B x C -> B x C x T
-        x = x.transpose(0, 1).transpose(1, 2)
-        out_lens = None
-        if padding_mask is not None:
-            out_lens = (~padding_mask).sum(1).float()
-        
-        for layer in self.layers:
-            x = self.activation_fn(layer(x))
+        if hasattr(self, 'layers'):
             if padding_mask is not None:
-                out_lens = ((out_lens - 1) / self.stride + 1).floor()
-        # B x C x T -> T x B x C
-        x = x.transpose(1, 2).transpose(0, 1)
-        x = self.dropout(x)
+                x = utils.index_put(x, padding_mask.T, 0)
+            
+            x = self.conv1d_layer_norm(x)
+
+            # T x B x C -> B x C x T
+            x = x.transpose(0, 1).transpose(1, 2)
+            out_lens = None
+            if padding_mask is not None:
+                out_lens = (~padding_mask).sum(1).float()
+            
+            for layer in self.layers:
+                x = self.activation_fn(layer(x))
+                if padding_mask is not None:
+                    out_lens = ((out_lens - 1) / self.stride + 1).floor()
+            # B x C x T -> T x B x C
+            x = x.transpose(1, 2).transpose(0, 1)
+            x = self.dropout(x)
 
         if self.post_proj is not None:
             x = x + self.dropout(self.post_proj(x))
             
         if self.final_layer_norm is not None:
             x = self.final_layer_norm(x)
-            
-        out_padding_mask = None
-        if padding_mask is not None:
-            out_padding_mask = lengths_to_padding_mask(out_lens.long())
-            x = utils.index_put(x, out_padding_mask.T, 0)
+        
+        if hasattr(self, 'layers'):
+            out_padding_mask = None
+            if padding_mask is not None:
+                out_padding_mask = lengths_to_padding_mask(out_lens.long())
+                x = utils.index_put(x, out_padding_mask.T, 0)
+        else:
+            out_padding_mask = padding_mask
 
         return x, out_padding_mask
