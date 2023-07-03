@@ -29,7 +29,7 @@ class ContextEncoderConfig(TransformerConfig):
     )
 
 class ContextEncoder(nn.Module):
-    def __init__(self, cfg: ContextEncoderConfig, return_ln=False):
+    def __init__(self, cfg: ContextEncoderConfig, return_ln=False, no_final_layer_norm=False):
         super().__init__()
 
         self.cfg = cfg
@@ -38,9 +38,11 @@ class ContextEncoder(nn.Module):
             [TransformerEncoderLayerBase(cfg, return_ln=return_ln) for _ in range(cfg.encoder.layers)]
         )
         self.normalize_before = cfg.encoder.normalize_before
-        self.layer_norm = LayerNorm(cfg.encoder.embed_dim)
+        if not no_final_layer_norm:
+            assert cfg.encoder.normalize_before
+            self.layer_norm = LayerNorm(cfg.encoder.embed_dim)
 
-    def forward(self, x, padding_mask: Optional[torch.Tensor]):     
+    def forward(self, x, padding_mask: Optional[torch.Tensor]):
         x = self.dropout_module(x)
 
         if padding_mask is not None:
@@ -56,7 +58,7 @@ class ContextEncoder(nn.Module):
                 x, ln_result = x
                 ln_results.append(ln_result)
 
-        if self.normalize_before:
+        if self.normalize_before and hasattr(self, "layer_norm"):
             x = self.layer_norm(x)
 
         return x, ln_results
