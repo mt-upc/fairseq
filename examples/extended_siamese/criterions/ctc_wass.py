@@ -7,6 +7,7 @@
 import logging
 import math
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import torch
 import torch.nn.functional as F
@@ -69,6 +70,14 @@ class CtcWassersteinCriterionConfig(CtcCriterionConfig):
         default=0.5,
         metadata={"help": "scaling in SampleLoss"},
     )
+    debug: bool = field(
+        default=False,
+        metadata={"help": "debug mode, save stuff during eval."},
+    )
+    debug_save_dir: str = field(
+        default="",
+        metadata={"help": "debug save dir."},
+    )
 
 @register_criterion(
     "ctc_wass", dataclass=CtcWassersteinCriterionConfig
@@ -89,6 +98,13 @@ class CtcWassersteinCriterion(CtcCriterion):
         self.ot_blur = cfg.ot_blur
         self.ot_scaling = cfg.ot_scaling
         self.ot_pos_weight = cfg.ot_pos_weight
+        
+        if hasattr(cfg, "debug"):
+            self.save = cfg.debug
+            self.debug_save_dir = Path(cfg.debug_save_dir)
+            self.debug_save_dir.mkdir(parents=True, exist_ok=True)
+        else:
+            self.save = False
 
         logging.info(f"*** Loss function ***")
         logging.info(f"ctc_weight = {self.ctc_weight}")
@@ -123,25 +139,31 @@ class CtcWassersteinCriterion(CtcCriterion):
             )
             loss += self.ctc_weight * ctc_loss
 
+        lvl = None
         if self.ot_weight > 0.0:
-            wass_loss = self.compute_wass_loss(encoder_out, net_input)
+            lvl = -1
+            wass_loss = self.compute_wass_loss(encoder_out, net_input, lvl=lvl, ids=sample["example_id"])
             loss += self.ot_weight * wass_loss
             extra["wass_loss"] = wass_loss
         elif self.ot_emb_weight > 0.0 and not model.training:
+            lvl = -1
             speech_out = model.encoder.forward_context(encoder_out[0])
             encoder_out = (speech_out, encoder_out[1])
-            wass_loss = self.compute_wass_loss(encoder_out, net_input)
+            wass_loss = self.compute_wass_loss(encoder_out, net_input, lvl=lvl, ids=sample["example_id"])
             extra["wass_loss"] = wass_loss
 
         if self.ot_emb_weight > 0.0:
-            wass_emb_loss = self.compute_wass_loss(encoder_out, net_input, lvl=0)
+            lvl = 0
+            wass_emb_loss = self.compute_wass_loss(encoder_out, net_input, lvl=lvl, ids=sample["example_id"])
             loss += self.ot_emb_weight * wass_emb_loss
             extra["wass_emb_loss"] = wass_emb_loss
             
         if self.ot_mid_weight > 0.0:
-            wass_mid_loss = self.compute_wass_loss(encoder_out, net_input, lvl=6)
+            lvl = 5
+            wass_mid_loss = self.compute_wass_loss(encoder_out, net_input, lvl=lvl, ids=sample["example_id"])
             loss += self.ot_mid_weight * wass_mid_loss
             extra["wass_mid_loss"] = wass_mid_loss
+            
     
         logging_output = {
             "loss": utils.item(loss.data)
@@ -169,10 +191,30 @@ class CtcWassersteinCriterion(CtcCriterion):
         
         if "modified_valid_examples" in encoder_out[0]:
             logging_output["num_valid_examples"] = encoder_out[0]["modified_valid_examples"][0].long().sum().item()
-        if net_output is not None and "compression_rate" in net_output[-1]:
-            logging_output["compression_rate"] = utils.item(
-                net_output[-1]["compression_rate"].data.sum()
+        if net_output is not None:
+            if "compression_rate" in net_output[-1]:
+                logging_output["compression_rate"] = utils.item(
+                    net_output[-1]["compression_rate"].data.sum()
+                )
+            if "letter_compression_rate" in net_output[-1]:
+                logging_output["letter_compression_rate"] = utils.item(
+                    net_output[-1]["letter_compression_rate"].data.sum()
+                )
+            if "word_compression_rate" in net_output[-1]:
+                logging_output["word_compression_rate"] = utils.item(
+                    net_output[-1]["word_compression_rate"].data.sum()
+                )
+                
+        if lvl is not None:
+            _, speech_lens, _ = self._get_speech_repr(encoder_out, lvl=lvl)
+            _, text_lens, _ = self._get_text_repr(net_input, encoder_out, lvl=lvl)
+            logging_output["speech_text_len_ratio"] = utils.item(
+                (speech_lens.float() / text_lens.float()).data.sum()
             )
+
+        if "num_predicted_sep" in extra:
+            logging_output["num_predicted_sep"] = extra["num_predicted_sep"]
+            logging_output["num_correct_sep"] = extra["num_correct_sep"]
 
         if not model.training and extra["ctc_loss"] != 0.0:
             logging_output = self.compute_wer(
@@ -200,6 +242,14 @@ class CtcWassersteinCriterion(CtcCriterion):
         targets_flat = targets.masked_select(pad_mask)
         target_lengths = pad_mask.sum(-1)
 
+        # separator stats
+        sep_preds = (lprobs.argmax(-1) == self.sep_idx).long()
+        num_predicted_sep = torch.tensor(0, device=sep_preds.device, dtype=torch.long)
+        for i in range(sep_preds.size(1)):
+            # real number of prerdicted separators
+            num_predicted_sep += sep_preds[:, i].unique_consecutive().sum()
+        num_correct_sep = (targets_flat == self.sep_idx).sum()
+
         with torch.backends.cudnn.flags(enabled=False):
             ctc_loss = F.ctc_loss(
                 lprobs,
@@ -214,6 +264,8 @@ class CtcWassersteinCriterion(CtcCriterion):
         extra["ctc_loss"] = ctc_loss
         extra["lprobs_ctc"] = lprobs
         extra["input_lengths"] = input_lengths
+        extra["num_predicted_sep"] = num_predicted_sep
+        extra["num_correct_sep"] = num_correct_sep
 
         return ctc_loss, extra
     
@@ -318,7 +370,7 @@ class CtcWassersteinCriterion(CtcCriterion):
         
         return text_out, text_lens, text_padding_mask
 
-    def compute_wass_loss(self, encoder_out, net_input, lvl=-1):
+    def compute_wass_loss(self, encoder_out, net_input, lvl=-1, ids=None):
         
         speech_out, speech_lens, speech_padding_mask = self._get_speech_repr(encoder_out, lvl)
         text_out, text_lens, text_padding_mask = self._get_text_repr(net_input, encoder_out, lvl)
@@ -364,9 +416,26 @@ class CtcWassersteinCriterion(CtcCriterion):
                 speech_out.float().transpose(0, 1).contiguous(),
                 text_weights.float(),
                 text_out.float().transpose(0, 1).contiguous()
-            ).sum()
+            )
             
-        return wass_loss
+        if self.save:
+            if lvl == -1:
+                l = "last"
+            elif lvl == 0:
+                l = "emb"
+            else:
+                l = "mid"
+            for i in range(speech_out.size(1)):
+                torch.save(
+                    {
+                        "speech_out": speech_out[:speech_lens[i], i, :-1].detach().cpu().clone(),
+                        "text_out": text_out[:text_lens[i], i, :-1].detach().cpu().clone(),
+                        "wass_loss": wass_loss[i].detach().cpu().clone()
+                    }, 
+                    self.debug_save_dir / f"{ids[i]}-{l}.pt"
+                )
+            
+        return wass_loss.sum()
 
     @staticmethod
     def reduce_metrics(logging_outputs) -> None:
@@ -429,10 +498,32 @@ class CtcWassersteinCriterion(CtcCriterion):
                 round=3,
             )
 
+        num_predicted_sep = utils.item(
+            sum(log.get("num_predicted_sep", 0) for log in logging_outputs)
+        )
+        num_correct_sep = utils.item(
+            sum(log.get("num_correct_sep", 0) for log in logging_outputs)
+        )
+        sep_pred_ratio = num_predicted_sep / num_correct_sep
+        metrics.log_scalar("sep_pred_ratio", sep_pred_ratio, round=3)        
+        
+        speech_text_len_ratio = utils.item(
+            sum(log.get("speech_text_len_ratio", 0) for log in logging_outputs)
+        ) / nsentences
+        metrics.log_scalar("speech_text_len_ratio", speech_text_len_ratio, round=3)
+
         compression_rate = utils.item(
             sum(log.get("compression_rate", 0) for log in logging_outputs)
         )
         metrics.log_scalar("compression_rate", compression_rate / nsentences, round=3)
+        letter_compression_rate = utils.item(
+            sum(log.get("letter_compression_rate", 0) for log in logging_outputs)
+        )
+        metrics.log_scalar("letter_compression_rate", letter_compression_rate / nsentences, round=3)
+        word_compression_rate = utils.item(
+            sum(log.get("word_compression_rate", 0) for log in logging_outputs)
+        )
+        metrics.log_scalar("word_compression_rate", word_compression_rate / nsentences, round=3)
 
         metrics.log_scalar("ntokens", ntokens)
         metrics.log_scalar("nsentences", nsentences)
