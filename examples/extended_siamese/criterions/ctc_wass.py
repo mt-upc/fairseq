@@ -86,6 +86,8 @@ class CtcWassersteinCriterion(CtcCriterion):
     def __init__(self, cfg: CtcWassersteinCriterionConfig, task: FairseqTask):
         super().__init__(cfg, task)
         
+        self.sep_idx = task.target_dictionary.index("|")
+        
         assert self.blank_idx == self.pad_idx
 
         self.ctc_weight = cfg.ctc_weight
