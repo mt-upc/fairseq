@@ -185,6 +185,8 @@ def save_checkpoint(cfg: CheckpointConfig, trainer, epoch_itr, val_loss):
                 os.remove(old_chk)
             elif PathManager.exists(old_chk):
                 PathManager.rm(old_chk)
+                
+    torch.cuda.empty_cache()
 
 
 def load_checkpoint(cfg: CheckpointConfig, trainer, **passthrough_args):
