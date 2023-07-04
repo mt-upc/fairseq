@@ -49,6 +49,7 @@ class LearnedScaledDotProductAttention(nn.Module):
         self.query = nn.Linear(embed_dim, embed_dim)
         self.key = nn.Linear(embed_dim, embed_dim)
         self.value = nn.Linear(embed_dim, embed_dim)
+        self.out = nn.Linear(embed_dim, embed_dim)
         self.scale = embed_dim ** 0.5
 
     def forward(self, x, padding_mask=None):
@@ -71,6 +72,8 @@ class LearnedScaledDotProductAttention(nn.Module):
 
         # Compute the weighted sum of values along the sequence dimension
         y = torch.einsum('bn,bnd->bd', attn_weights, v)  # [B, D]
+        
+        y = self.out(y)  # [B, D]
 
         return y
 
