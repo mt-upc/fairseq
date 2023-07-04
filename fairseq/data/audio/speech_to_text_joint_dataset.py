@@ -81,7 +81,7 @@ class SpeechToTextJointDatasetItem(NamedTuple):
     id: Optional[str] = None
     src_txt_enc: Optional[torch.Tensor] = None
     src_txt_ln0: Optional[torch.Tensor] = None
-    src_txt_ln6: Optional[torch.Tensor] = None
+    src_txt_ln5: Optional[torch.Tensor] = None
 
 
 # use_src_lang_id:
@@ -171,12 +171,12 @@ class SpeechToTextJointDataset(SpeechToTextDataset):
         if self.alignment is not None:
             ali = torch.Tensor(self.alignment[index]).float()
             
-        src_txt_enc, src_txt_ln0, src_txt_ln6 = None, None, None
+        src_txt_enc, src_txt_ln0, src_txt_ln5 = None, None, None
         if self.src_text_reprs is not None:
             repr = torch.load(self.src_text_reprs[index], map_location=torch.device("cpu"))
             src_txt_enc = repr["encoder_out"]
             src_txt_ln0 = repr["ln_results0"]
-            src_txt_ln6 = repr["ln_results6"]
+            src_txt_ln5 = repr["ln_results5"]
             
         return SpeechToTextJointDatasetItem(
             index=index,
@@ -189,13 +189,13 @@ class SpeechToTextJointDataset(SpeechToTextDataset):
             id=s2t_dataset_item.id,
             src_txt_enc=src_txt_enc,
             src_txt_ln0=src_txt_ln0,
-            src_txt_ln6=src_txt_ln6
+            src_txt_ln5=src_txt_ln5
         )
 
     def __len__(self):
         return self.n_samples
     
-    def collate_cached(self, enc: List[torch.Tensor], ln0: List[torch.Tensor] , ln6: List[torch.Tensor], order):
+    def collate_cached(self, enc: List[torch.Tensor], ln0: List[torch.Tensor] , ln5: List[torch.Tensor], order):
         enc = [enc[i] for i in order]
         lengths = torch.tensor([r.size(0) for r in enc], dtype=torch.long)
         max_len = lengths.max().item()
@@ -212,14 +212,14 @@ class SpeechToTextJointDataset(SpeechToTextDataset):
             for i, e in enumerate(ln0):
                 ln0_collated[i, :e.size(0)] = e
                 
-        ln6_collated = None
-        if ln6[0] is not None:
-            ln6 = [ln6[i] for i in order]
-            ln6_collated = torch.zeros(bs, max_len, dim, dtype=ln6[0].dtype, device=ln6[0].device)
-            for i, e in enumerate(ln6):
-                ln6_collated[i, :e.size(0)] = e
+        ln5_collated = None
+        if ln5[0] is not None:
+            ln5 = [ln5[i] for i in order]
+            ln5_collated = torch.zeros(bs, max_len, dim, dtype=ln5[0].dtype, device=ln5[0].device)
+            for i, e in enumerate(ln5):
+                ln5_collated[i, :e.size(0)] = e
 
-        return enc_collated, lengths, ln0_collated, ln6_collated
+        return enc_collated, lengths, ln0_collated, ln5_collated
         
         
     def collater(self, samples: List[SpeechToTextJointDatasetItem]) -> Dict:
@@ -260,17 +260,17 @@ class SpeechToTextJointDataset(SpeechToTextDataset):
             net_input["src_txt_lengths"] = src_txt_lengths
 
         if samples[0].src_txt_enc is not None:
-            src_txt_enc, src_txt_lengths, src_txt_ln0, src_txt_ln6 = self.collate_cached(
+            src_txt_enc, src_txt_lengths, src_txt_ln0, src_txt_ln5 = self.collate_cached(
                 [x.src_txt_enc for x in samples],
                 [x.src_txt_ln0 for x in samples],
-                [x.src_txt_ln6 for x in samples],
+                [x.src_txt_ln5 for x in samples],
                 order
             )
             net_input["src_txt_enc"] = src_txt_enc
             net_input["src_txt_lengths"] = src_txt_lengths
             net_input["src_txt_ln_results"] = [None for _ in range(12)]
             net_input["src_txt_ln_results"][0] = src_txt_ln0
-            net_input["src_txt_ln_results"][6] = src_txt_ln6
+            net_input["src_txt_ln_results"][5] = src_txt_ln5
         
         net_input["alignment"] = None
         if self.alignment is not None:
