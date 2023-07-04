@@ -216,18 +216,35 @@ class CTCDecoder(FairseqDecoder):
         return x.transpose(0, 1), {"attn": [], "inner_states": None}
 
     def compress(self, decoder_out, speech_out):
-        decoder_out, speech_out = self.letter_compression(decoder_out, speech_out)
+        decoder_out, speech_out = self.letter_compression_old(decoder_out, speech_out)
         if self.cfg.ctc_compression.type == "word":
             decoder_out, speech_out = self.word_compression(decoder_out, speech_out)
         return decoder_out, speech_out
 
-    def letter_pool(self, x):
+    def letter_pool_old(self, x):
         # TODO remove later
         # for backward compatibility
         if self.cfg.ctc_compression.letter_pooling_fn == "mean":
             y = torch.mean(x, dim=0)
         elif self.cfg.ctc_compression.letter_pooling_fn == "max":
             y = torch.max(x, dim=0)[0]
+        elif self.cfg.ctc_compression.letter_pooling_fn in ["attention", "learned_attention"]:
+            if x.size(0) > 1:
+                y = self.letter_attention(x.unsqueeze(0))
+                y = y.squeeze(0)
+            else:
+                y = x[0]
+        return y
+    
+    def letter_pool(self, x, lens=None):
+        # TODO remove later
+        # for backward compatibility
+        if self.cfg.ctc_compression.letter_pooling_fn == "mean":
+            lens_ = lens.to(x.dtype)
+            lens_[lens_ == .0] = 1.5 # to avoid division by 0
+            y = torch.sum(x, dim=1) / lens_.unsqueeze(1)
+        elif self.cfg.ctc_compression.letter_pooling_fn == "max":
+            y = torch.max(x, dim=1)[0]
         elif self.cfg.ctc_compression.letter_pooling_fn in ["attention", "learned_attention"]:
             if x.size(0) > 1:
                 y = self.letter_attention(x.unsqueeze(0))
@@ -248,10 +265,11 @@ class CTCDecoder(FairseqDecoder):
             valid_mask = mask.eq(0).any(dim=1)
             y[valid_mask] = self.word_attention(x[valid_mask], mask[valid_mask])
         return y
+    
 
     def letter_compression(self, decoder_out, speech_out):
         x = speech_out["encoder_out"][0].transpose(0, 1)  # T x B x D
-        prev_lengths = speech_out["encoder_out_lengths"][0] # B
+        lens = speech_out["encoder_out_lengths"][0] # B
 
         with torch.no_grad():
             lprobs_ctc = F.log_softmax(decoder_out[0], dim=-1)  # T x B x V
@@ -261,59 +279,55 @@ class CTCDecoder(FairseqDecoder):
         x = x.transpose(0, 1) # B x T x D
         preds = preds.transpose(0, 1) # B x T
 
-        # max number of non-blank tokens in a batch of sequences
-        N = (preds != self.blank_idx).sum(dim=-1).max().item()
-        if not N:
-            N = 1 # for rare case where whole batch is blank
-        
-        # create the compressed sequence with N positions
-        # will be further reduced after getting the actual lengths
-        x_compr = torch.zeros(B, N, D, device=x.device, dtype=x.dtype) # B x N x D
-        p_compr = torch.zeros(B, N, device=x.device, dtype=torch.long) # B x N
-        lengths_compr = torch.zeros(B, device=x.device, dtype=torch.long) # B
-        valid_examples = torch.zeros(B, device=x.device, dtype=torch.bool) # B
-
+        counts_list = []
+        compr_preds = []
         for i in range(B):
             # p: compressed sequence, [N_i]
             # c: repeating counts for each j element of p, [N_i]
             p, c = preds[i].unique_consecutive(return_counts=True)
-            valid_mask_i = p != self.blank_idx # [N_i]
-            x_splt = torch.split(x[i], c.tolist()) # Tuple[tensor] of size N_i, x_splt[0] is the first c[0] elements of x[i]
+            counts_list.append(c)
+            compr_preds.append(p)
             
-            # TODO: this can be done in parallel
-            # out = pad_sequence([x_split, batch_first=True, padding_value=0)
-            # out = self.letter_pool(out, lens)
-            out = torch.stack([self.letter_pool(t) for t in x_splt]) # N_i x D
-            if not valid_mask_i.any():
-                # empty examples have just one blank
-                x_compr[i, :1] = out
-                lengths_compr[i] = 1
-            else:
-                # TODO: after removing pads we can have consecutive letters that are not collapsed
-                # remove blank tokens
-                out = out[valid_mask_i] # N_i' x D
-                p = p[valid_mask_i] # N_i'
-
-                x_compr[i, :out.size(0)] = out
-                p_compr[i, :out.size(0)] = p
-                lengths_compr[i] = out.size(0)
-                valid_examples[i] = True
-
-        # real max length after removing blanks
-        max_length = lengths_compr.max().item()
-
-        x_compr = x_compr[:, :max_length]
-        p_compr = p_compr[:, :max_length]
-        x_compr_mask = lengths_to_padding_mask(lengths_compr)
+        counts = pad_sequence(counts_list, batch_first=True, padding_value=0)
+        compr_preds = pad_sequence(compr_preds, batch_first=True, padding_value=self.blank_idx)
+            
+        # create a tensor to fill-in
+        n = counts.size(1)
+        m = counts.max()
+        x_compr = torch.zeros(B, n, m, D, device=x.device, dtype=x.dtype)
         
-        decoder_out[-1]["letter_compression_rate"] = prev_lengths.float() / lengths_compr.float()
+        for i in range(B):
+            x_letters_i = torch.split(x[i, :lens[i]], counts_list[i].tolist()) # Tuple[2d tensor]
+            x_letters_i = pad_sequence(x_letters_i, batch_first=True, padding_value=0) # n_i x m_i x D
+            x_compr[i, :x_letters_i.size(0), :x_letters_i.size(1)] = x_letters_i
+            
+        x_compr = x_compr.view(B * n, m, D)
+        counts = counts.view(B * n)       
+        
+        x_compr = self.letter_pool(x_compr, lens=counts) # B * n x D
+        
+        x_compr = x_compr.view(B, n, D) # B x n x D
+        
+        compr_valid_mask = compr_preds != self.blank_idx # B x n
+        compr_valid_lens = compr_valid_mask.sum(dim=-1) # B
+        
+        # remove blanks
+        x_compr = torch.split(x_compr[compr_valid_mask], compr_valid_lens.tolist()) # Tuple[tensor] of size B
+        x_compr = pad_sequence(x_compr, batch_first=True, padding_value=0) # B x N x D
+        
+        compr_preds = torch.split(compr_preds[compr_valid_mask], compr_valid_lens.tolist()) # Tuple[tensor] of size B
+        compr_preds = pad_sequence(compr_preds, batch_first=True, padding_value=self.blank_idx) # B x N
+        
+        mask = lengths_to_padding_mask(compr_valid_lens) # B x N
+        
+        decoder_out[-1]["letter_compression_rate"] = lens.float() / compr_valid_lens.float()
         decoder_out[-1]["comression_rate"] = decoder_out[-1]["letter_compression_rate"]
-        decoder_out[-1]["compressed_predictions"] = p_compr
+        decoder_out[-1]["compressed_predictions"] = compr_preds
         
-        speech_out["modified_valid_examples"] = [valid_examples]
+        # speech_out["modified_valid_examples"] = [valid_examples]
         speech_out["modified_out"] = [x_compr]
-        speech_out["modified_padding_mask"] = [x_compr_mask]
-        speech_out["modified_out_lengths"] = [lengths_compr]
+        speech_out["modified_padding_mask"] = [mask]
+        speech_out["modified_out_lengths"] = [compr_valid_lens]
 
         return decoder_out, speech_out
     
@@ -394,4 +408,72 @@ class CTCDecoder(FairseqDecoder):
         speech_out["modified_padding_mask"] = [x_compr_mask]
         speech_out["modified_out_lengths"] = [x_compr_lens]
         
+        return decoder_out, speech_out
+        
+    def letter_compression_old(self, decoder_out, speech_out):
+        x = speech_out["encoder_out"][0].transpose(0, 1)  # T x B x D
+        prev_lengths = speech_out["encoder_out_lengths"][0] # B
+
+        with torch.no_grad():
+            lprobs_ctc = F.log_softmax(decoder_out[0], dim=-1)  # T x B x V
+            preds = torch.argmax(lprobs_ctc, dim=-1)  # T x B
+
+        T, B, D = x.size()
+        x = x.transpose(0, 1) # B x T x D
+        preds = preds.transpose(0, 1) # B x T
+
+        # max number of non-blank tokens in a batch of sequences
+        N = (preds != self.blank_idx).sum(dim=-1).max().item()
+        if not N:
+            N = 1 # for rare case where whole batch is blank
+        
+        # create the compressed sequence with N positions
+        # will be further reduced after getting the actual lengths
+        x_compr = torch.zeros(B, N, D, device=x.device, dtype=x.dtype) # B x N x D
+        p_compr = torch.zeros(B, N, device=x.device, dtype=torch.long) # B x N
+        lengths_compr = torch.zeros(B, device=x.device, dtype=torch.long) # B
+        valid_examples = torch.zeros(B, device=x.device, dtype=torch.bool) # B
+
+        for i in range(B):
+            # p: compressed sequence, [N_i]
+            # c: repeating counts for each j element of p, [N_i]
+            p, c = preds[i].unique_consecutive(return_counts=True)
+            valid_mask_i = p != self.blank_idx # [N_i]
+            x_splt = torch.split(x[i], c.tolist()) # Tuple[tensor] of size N_i, x_splt[0] is the first c[0] elements of x[i]
+            
+            # TODO: this can be done in parallel
+            # out = pad_sequence([x_split, batch_first=True, padding_value=0)
+            # out = self.letter_pool(out, lens)
+            out = torch.stack([self.letter_pool_old(t) for t in x_splt]) # N_i x D
+            if not valid_mask_i.any():
+                # empty examples have just one blank
+                x_compr[i, :1] = out
+                lengths_compr[i] = 1
+            else:
+                # TODO: after removing pads we can have consecutive letters that are not collapsed
+                # remove blank tokens
+                out = out[valid_mask_i] # N_i' x D
+                p = p[valid_mask_i] # N_i'
+
+                x_compr[i, :out.size(0)] = out
+                p_compr[i, :out.size(0)] = p
+                lengths_compr[i] = out.size(0)
+                valid_examples[i] = True
+
+        # real max length after removing blanks
+        max_length = lengths_compr.max().item()
+
+        x_compr = x_compr[:, :max_length]
+        p_compr = p_compr[:, :max_length]
+        x_compr_mask = lengths_to_padding_mask(lengths_compr)
+        
+        decoder_out[-1]["letter_compression_rate"] = prev_lengths.float() / lengths_compr.float()
+        decoder_out[-1]["comression_rate"] = decoder_out[-1]["letter_compression_rate"]
+        decoder_out[-1]["compressed_predictions"] = p_compr
+        
+        # speech_out["modified_valid_examples"] = [valid_examples]
+        speech_out["modified_out"] = [x_compr]
+        speech_out["modified_padding_mask"] = [x_compr_mask]
+        speech_out["modified_out_lengths"] = [lengths_compr]
+
         return decoder_out, speech_out
