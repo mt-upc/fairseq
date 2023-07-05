@@ -159,7 +159,10 @@ class CtcWassersteinCriterion(CtcCriterion):
         speech_lens = speech_lens.repeat(m)
         speech_padding_mask = speech_padding_mask.repeat(m, 1)
         
-        text_out = torch.cat([text_out, *[encoder_out[1]["ln_results"][layer_id] for layer_id in self.ot_aux_layers]], dim=1)
+        if "src_txt_enc" in net_input:
+            text_out = torch.cat([text_out, *[net_input["src_txt_ln_results"][layer_id].transpose(0, 1) for layer_id in self.ot_aux_layers]], dim=1)
+        else:   
+            text_out = torch.cat([text_out, *[encoder_out[1]["ln_results"][layer_id] for layer_id in self.ot_aux_layers]], dim=1)
         text_lens = text_lens.repeat(m)
         text_padding_mask = text_padding_mask.repeat(m, 1)
         
@@ -425,73 +428,6 @@ class CtcWassersteinCriterion(CtcCriterion):
                 )
         
         return wass_loss
-
-    def compute_wass_loss_old(self, encoder_out, net_input, lvl=-1, ids=None):
-        
-        speech_out, speech_lens, speech_padding_mask = self._get_speech_repr(encoder_out, lvl)
-        text_out, text_lens, text_padding_mask = self._get_text_repr(net_input, encoder_out, lvl)
-
-        S, B, _ = speech_out.size()
-        T = text_out.size()[0]
-        dev = speech_out.device
-            
-        # zero-out padding (remove later)
-        speech_out = speech_out.masked_fill(speech_padding_mask.transpose(0, 1).unsqueeze(-1), 0.0)
-        text_out = text_out.masked_fill(text_padding_mask.transpose(0, 1).unsqueeze(-1), 0.0)
-
-        if self.ot_pos_weight > 0.0:
-            # create tensor in which the elements are range of lengths
-            speech_pos = torch.matmul(
-                torch.tensor(range(S), dtype=torch.float, device=dev).unsqueeze(-1), 
-                torch.ones((1, B), device=dev)
-            ) # S x B
-            text_pos = torch.matmul(
-                torch.tensor(range(T), dtype=torch.float, device=dev).unsqueeze(-1), 
-                torch.ones((1, B), device=dev)
-            ) # T x B
-            speech_pos = self.ot_pos_weight * speech_pos / (speech_lens - 1).unsqueeze(0) # S x B
-            text_pos = self.ot_pos_weight * text_pos / (text_lens - 1).unsqueeze(0) # T x B
-            speech_out = torch.cat((speech_out, speech_pos.unsqueeze(-1)), dim=-1) # S x B x D+1
-            text_out = torch.cat((text_out, text_pos.unsqueeze(-1)), dim=-1) # T x B x D+1
-
-        if self.ot_distribution == "uniform":
-            speech_weights = torch.ones_like(speech_padding_mask) / speech_lens.unsqueeze(-1) # B x S
-            text_weights = torch.ones_like(text_padding_mask) / text_lens.unsqueeze(-1) # B x T
-        elif self.ot_distribution == "norm":
-            speech_norm = torch.norm(speech_out.detach().transpose(0, 1), dim=-1) # B x S
-            speech_weights = speech_norm / speech_norm.sum(dim=-1, keepdim=True) # B x S
-            text_norm = torch.norm(text_out.detach().transpose(0, 1), dim=-1) # B x T
-            text_weights = text_norm / text_norm.sum(dim=-1, keepdim=True) # B x T
-        # zero weights for padding
-        speech_weights.masked_fill_(speech_padding_mask, 0.0)
-        text_weights.masked_fill_(text_padding_mask, 0.0)
-            
-        with torch.cuda.amp.autocast(enabled=False):
-            wass_loss = self.ot_loss(
-                speech_weights.float(),
-                speech_out.float().transpose(0, 1).contiguous(),
-                text_weights.float(),
-                text_out.float().transpose(0, 1).contiguous()
-            )
-            
-        if self.save:
-            if lvl == -1:
-                l = "last"
-            elif lvl == 0:
-                l = "emb"
-            else:
-                l = "mid"
-            for i in range(speech_out.size(1)):
-                torch.save(
-                    {
-                        "speech_out": speech_out[:speech_lens[i], i, :-1].detach().cpu().clone(),
-                        "text_out": text_out[:text_lens[i], i, :-1].detach().cpu().clone(),
-                        "wass_loss": wass_loss[i].detach().cpu().clone()
-                    }, 
-                    self.debug_save_dir / f"{ids[i]}-{l}.pt"
-                )
-            
-        return wass_loss.sum()
 
     @staticmethod
     def reduce_metrics(logging_outputs) -> None:
