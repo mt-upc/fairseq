@@ -188,23 +188,20 @@ class CtcWassersteinCriterion(CtcCriterion):
             "sample_size": net_input["src_tokens"].size(0)
             if self.sentence_avg
             else sample["ntokens"],
-            "num_valid_examples": sample["id"].numel(),
         }
         
-        if "modified_valid_examples" in encoder_out[0]:
-            logging_output["num_valid_examples"] = encoder_out[0]["modified_valid_examples"][0].long().sum().item()
         if net_output is not None:
-            if "compression_rate" in net_output[-1]:
+            if "compression_rate" in encoder_out[0]:
                 logging_output["compression_rate"] = utils.item(
-                    net_output[-1]["compression_rate"].data.sum()
+                    encoder_out[0]["compression_rate"].data.sum()
                 )
-            if "letter_compression_rate" in net_output[-1]:
-                logging_output["letter_compression_rate"] = utils.item(
-                    net_output[-1]["letter_compression_rate"].data.sum()
+            if "char_compression_rate" in encoder_out[0]:
+                logging_output["char_compression_rate"] = utils.item(
+                    encoder_out[0]["char_compression_rate"].data.sum()
                 )
-            if "word_compression_rate" in net_output[-1]:
-                logging_output["word_compression_rate"] = utils.item(
-                    net_output[-1]["word_compression_rate"].data.sum()
+            if "token_compression_rate" in encoder_out[0]:
+                logging_output["token_compression_rate"] = utils.item(
+                    encoder_out[0]["token_compression_rate"].data.sum()
                 )
                 
         if lvl is not None:
@@ -464,9 +461,6 @@ class CtcWassersteinCriterion(CtcCriterion):
         sample_size = utils.item(
             sum(log.get("sample_size", 0) for log in logging_outputs)
         )
-        num_valid_examples = utils.item(
-            sum(log.get("num_valid_examples", 0) for log in logging_outputs)
-        )
         metrics.log_scalar(
             "loss", loss_sum / sample_size / math.log(2), sample_size, round=3
         )
@@ -518,23 +512,18 @@ class CtcWassersteinCriterion(CtcCriterion):
             sum(log.get("compression_rate", 0) for log in logging_outputs)
         )
         metrics.log_scalar("compression_rate", compression_rate / nsentences, round=3)
-        letter_compression_rate = utils.item(
-            sum(log.get("letter_compression_rate", 0) for log in logging_outputs)
+        char_compression_rate = utils.item(
+            sum(log.get("char_compression_rate", 0) for log in logging_outputs)
         )
-        metrics.log_scalar("letter_compression_rate", letter_compression_rate / nsentences, round=3)
-        word_compression_rate = utils.item(
-            sum(log.get("word_compression_rate", 0) for log in logging_outputs)
+        metrics.log_scalar("char_compression_rate", char_compression_rate / nsentences, round=3)
+        token_compression_rate = utils.item(
+            sum(log.get("token_compression_rate", 0) for log in logging_outputs)
         )
-        metrics.log_scalar("word_compression_rate", word_compression_rate / nsentences, round=3)
+        metrics.log_scalar("token_compression_rate", token_compression_rate / nsentences, round=3)
 
         metrics.log_scalar("ntokens", ntokens)
         metrics.log_scalar("nsentences", nsentences)
-        metrics.log_scalar(
-            "invalid_examples",
-            100 * (nsentences - num_valid_examples) / nsentences, 
-            round=2
-        )
-
+        
         c_errors = sum(log.get("c_errors", 0) for log in logging_outputs)
         metrics.log_scalar("_c_errors", c_errors)
         c_total = sum(log.get("c_total", 0) for log in logging_outputs)
