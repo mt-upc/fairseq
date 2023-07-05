@@ -257,8 +257,6 @@ class Compressor(nn.Module):
         x_compr = torch.zeros(B, n, m, D, device=x.device, dtype=x.dtype)
 
         for i in range(B):
-            if i == 47:
-                breakpoint()
             x_chars_i = torch.split(x[i], counts_list[i].tolist()) # Tuple[2d tensor]
             x_chars_i = pad_sequence(
                 x_chars_i, batch_first=True, padding_value=0
@@ -280,6 +278,13 @@ class Compressor(nn.Module):
 
         compr_valid_mask = compr_preds != self.blank_idx  # B x n
         compr_valid_lens = compr_valid_mask.sum(dim=-1)  # B
+        
+        # correction for completelly empty sequence
+        empty_examples = compr_valid_lens == 0
+        if empty_examples.any():
+            compr_valid_mask[empty_examples, 0] = True
+            compr_valid_lens[empty_examples] = 1
+            compr_preds[empty_examples, 0] = self.blank_idx
 
         # remove blanks
         x_compr = torch.split(
