@@ -38,14 +38,6 @@ class CtcWassersteinCriterionConfig(CtcCriterionConfig):
         default=0.0,
         metadata={"help": "Weight for OT loss"},
     )
-    ot_emb_weight: float = field(
-        default=0.0,
-        metadata={"help": "Weight for OT loss between the text embedding and output of the speech encoder"},
-    )
-    ot_mid_weight: float = field(
-        default=0.0,
-        metadata={"help": "Weight for OT loss between the 6th (middle) layer of each encoder"},
-    )
     ot_pos_weight: float = field(
         default=1.0,
         metadata={"help": "Weight for OT positional embeddings"},
@@ -78,7 +70,19 @@ class CtcWassersteinCriterionConfig(CtcCriterionConfig):
         default="",
         metadata={"help": "debug save dir."},
     )
-
+    ot_aux_layers: str = field(
+        default="",
+        metadata={"help": "comma-separated auxiliary layers for OT loss."},
+    )
+    ot_aux_weights: str = field(
+        default="",
+        metadata={"help": "comma-separated auxiliary weights for OT loss."},
+    )
+    eval_wer: bool = field(
+        default=False,
+        metadata={"help": "report WER during eval."},
+    )
+    
 @register_criterion(
     "ctc_wass", dataclass=CtcWassersteinCriterionConfig
 )
@@ -92,14 +96,18 @@ class CtcWassersteinCriterion(CtcCriterion):
 
         self.ctc_weight = cfg.ctc_weight
         self.ot_weight = cfg.ot_weight
-        self.ot_emb_weight = cfg.ot_emb_weight
-        self.ot_mid_weight = cfg.ot_mid_weight
         self.ot_distribution = cfg.ot_distribution
         self.ot_loss = cfg.ot_loss
         self.ot_p = cfg.ot_p
         self.ot_blur = cfg.ot_blur
         self.ot_scaling = cfg.ot_scaling
         self.ot_pos_weight = cfg.ot_pos_weight
+        
+        self.ot_aux_layers = [int(l) for l in cfg.ot_aux_layers.split(",")]
+        self.ot_aux_weights = [float(w) for w in cfg.ot_aux_weights.split(",")]
+        assert len(self.ot_aux_layers) == len(self.ot_aux_weights)
+        
+        self.eval_wer = cfg.eval_wer
         
         if hasattr(cfg, "debug"):
             self.save = cfg.debug
@@ -111,8 +119,6 @@ class CtcWassersteinCriterion(CtcCriterion):
         logging.info(f"*** Loss function ***")
         logging.info(f"ctc_weight = {self.ctc_weight}")
         logging.info(f"ot_weight = {self.ot_weight}")
-        logging.info(f"ot_emb_weight = {self.ot_emb_weight}")
-        logging.info(f"ot_mid_weight = {self.ot_mid_weight}")
         logging.info(f"ot_pos_weight = {self.ot_pos_weight}")
         logging.info(f"ot_loss = {self.ot_loss}, ot_p = {self.ot_p}, ot_blur = {self.ot_blur}, ot_scaling = {self.ot_scaling}")
 
@@ -133,7 +139,9 @@ class CtcWassersteinCriterion(CtcCriterion):
         )
 
         loss = 0.0
-        extra = {"ctc_loss": 0.0, "wass_loss": 0.0, "wass_emb_loss": 0.0, "wass_mid_loss": 0.0}
+        extra = {"ctc_loss": 0.0, "wass_loss": 0.0}
+        for layer_id in self.ot_aux_layers:
+            extra[f"wass_loss_{layer_id}"] = 0.0
 
         if self.ctc_weight > 0.0:
             ctc_loss, extra = self.compute_ctc_loss(
@@ -141,31 +149,28 @@ class CtcWassersteinCriterion(CtcCriterion):
             )
             loss += self.ctc_weight * ctc_loss
 
-        lvl = None
-        if self.ot_weight > 0.0:
-            lvl = -1
-            wass_loss = self.compute_wass_loss(encoder_out, net_input, lvl=lvl, ids=sample["example_id"])
-            loss += self.ot_weight * wass_loss
-            extra["wass_loss"] = wass_loss
-        elif self.ot_emb_weight > 0.0 and not model.training:
-            lvl = -1
-            speech_out = model.encoder.forward_context(encoder_out[0])
-            encoder_out = (speech_out, encoder_out[1])
-            wass_loss = self.compute_wass_loss(encoder_out, net_input, lvl=lvl, ids=sample["example_id"])
-            extra["wass_loss"] = wass_loss
+        speech_out, speech_lens, speech_padding_mask = self._get_speech_repr(encoder_out, lvl=-1)
+        text_out, text_lens, text_padding_mask = self._get_text_repr(net_input, encoder_out, lvl=-1)
 
-        if self.ot_emb_weight > 0.0:
-            lvl = 0
-            wass_emb_loss = self.compute_wass_loss(encoder_out, net_input, lvl=lvl, ids=sample["example_id"])
-            loss += self.ot_emb_weight * wass_emb_loss
-            extra["wass_emb_loss"] = wass_emb_loss
-            
-        if self.ot_mid_weight > 0.0:
-            lvl = 5
-            wass_mid_loss = self.compute_wass_loss(encoder_out, net_input, lvl=lvl, ids=sample["example_id"])
-            loss += self.ot_mid_weight * wass_mid_loss
-            extra["wass_mid_loss"] = wass_mid_loss
-            
+        m = len(self.ot_aux_weights) + 1
+        B = speech_out.size(1)
+        
+        speech_out = torch.cat([speech_out, *[encoder_out[0]["context_ln_results"][layer_id] for layer_id in self.ot_aux_layers]], dim=1)
+        speech_lens = speech_lens.repeat(m)
+        speech_padding_mask = speech_padding_mask.repeat(m, 1)
+        
+        text_out = torch.cat([text_out, *[encoder_out[1]["ln_results"][layer_id] for layer_id in self.ot_aux_layers]], dim=1)
+        text_lens = text_lens.repeat(m)
+        text_padding_mask = text_padding_mask.repeat(m, 1)
+        
+        wass_loss = self.compute_wass_loss(speech_out, speech_lens, speech_padding_mask, text_out, text_lens, text_padding_mask, ids=sample["example_id"])
+        
+        extra["wass_loss"] = wass_loss[:B].sum()
+        loss += self.ot_weight * extra["wass_loss"]
+        
+        for i, layer_id in enumerate(self.ot_aux_layers):
+            extra[f"wass_loss_{layer_id}"] = wass_loss[B*(i+1):B*(i+2)].sum()
+            loss += self.ot_aux_weights[i] * extra[f"wass_loss_{layer_id}"]
     
         logging_output = {
             "loss": utils.item(loss.data)
@@ -177,18 +182,15 @@ class CtcWassersteinCriterion(CtcCriterion):
             "wass_loss": utils.item(extra["wass_loss"].data)
             if extra["wass_loss"] != 0.0
             else 0.0,
-            "wass_emb_loss": utils.item(extra["wass_emb_loss"].data)
-            if extra["wass_emb_loss"] != 0.0
-            else 0.0,
-            "wass_mid_loss": utils.item(extra["wass_mid_loss"].data)
-            if extra["wass_mid_loss"] != 0.0
-            else 0.0,
             "ntokens": sample["ntokens"],
             "nsentences": sample["id"].numel(),
             "sample_size": net_input["src_tokens"].size(0)
             if self.sentence_avg
             else sample["ntokens"],
         }
+        
+        for i, layer_id in enumerate(self.ot_aux_layers):
+            logging_output[f"wass_loss_{layer_id}"] = utils.item(extra[f"wass_loss_{layer_id}"].data) if extra[f"wass_loss_{layer_id}"] != 0.0 else 0.0
         
         if net_output is not None:
             if "compression_rate" in encoder_out[0]:
@@ -204,18 +206,15 @@ class CtcWassersteinCriterion(CtcCriterion):
                     encoder_out[0]["token_compression_rate"].data.sum()
                 )
                 
-        if lvl is not None:
-            _, speech_lens, _ = self._get_speech_repr(encoder_out, lvl=lvl)
-            _, text_lens, _ = self._get_text_repr(net_input, encoder_out, lvl=lvl)
-            logging_output["speech_text_len_ratio"] = utils.item(
-                (speech_lens.float() / text_lens.float()).data.sum()
-            )
+        logging_output["speech_text_len_ratio"] = utils.item(
+            (speech_lens[:B].float() / text_lens[:B].float()).data.sum()
+        )
 
         if "num_predicted_sep" in extra:
             logging_output["num_predicted_sep"] = extra["num_predicted_sep"]
             logging_output["num_correct_sep"] = extra["num_correct_sep"]
 
-        if not model.training and extra["ctc_loss"] != 0.0:
+        if not model.training and extra["ctc_loss"] != 0.0 and self.eval_wer:
             logging_output = self.compute_wer(
                 extra["lprobs_ctc"],
                 sample,
@@ -368,8 +367,66 @@ class CtcWassersteinCriterion(CtcCriterion):
                 text_padding_mask = lengths_to_padding_mask(text_lens)
         
         return text_out, text_lens, text_padding_mask
+    
+    def compute_wass_loss(self, speech_out, speech_lens, speech_padding_mask, text_out, text_lens, text_padding_mask, ids=None):
 
-    def compute_wass_loss(self, encoder_out, net_input, lvl=-1, ids=None):
+        S, B, _ = speech_out.size()
+        T = text_out.size()[0]
+        dev = speech_out.device
+            
+        # zero-out padding (remove later)
+        speech_out = speech_out.masked_fill(speech_padding_mask.transpose(0, 1).unsqueeze(-1), 0.0)
+        text_out = text_out.masked_fill(text_padding_mask.transpose(0, 1).unsqueeze(-1), 0.0)
+
+        if self.ot_pos_weight > 0.0:
+            # create tensor in which the elements are range of lengths
+            speech_pos = torch.matmul(
+                torch.tensor(range(S), dtype=torch.float, device=dev).unsqueeze(-1), 
+                torch.ones((1, B), device=dev)
+            ) # S x B
+            text_pos = torch.matmul(
+                torch.tensor(range(T), dtype=torch.float, device=dev).unsqueeze(-1), 
+                torch.ones((1, B), device=dev)
+            ) # T x B
+            speech_pos = self.ot_pos_weight * speech_pos / (speech_lens - 1).unsqueeze(0) # S x B
+            text_pos = self.ot_pos_weight * text_pos / (text_lens - 1).unsqueeze(0) # T x B
+            speech_out = torch.cat((speech_out, speech_pos.unsqueeze(-1)), dim=-1) # S x B x D+1
+            text_out = torch.cat((text_out, text_pos.unsqueeze(-1)), dim=-1) # T x B x D+1
+
+        if self.ot_distribution == "uniform":
+            speech_weights = torch.ones_like(speech_padding_mask) / speech_lens.unsqueeze(-1) # B x S
+            text_weights = torch.ones_like(text_padding_mask) / text_lens.unsqueeze(-1) # B x T
+        elif self.ot_distribution == "norm":
+            speech_norm = torch.norm(speech_out.detach().transpose(0, 1), dim=-1) # B x S
+            speech_weights = speech_norm / speech_norm.sum(dim=-1, keepdim=True) # B x S
+            text_norm = torch.norm(text_out.detach().transpose(0, 1), dim=-1) # B x T
+            text_weights = text_norm / text_norm.sum(dim=-1, keepdim=True) # B x T
+        # zero weights for padding
+        speech_weights.masked_fill_(speech_padding_mask, 0.0)
+        text_weights.masked_fill_(text_padding_mask, 0.0)
+            
+        with torch.cuda.amp.autocast(enabled=False):
+            wass_loss = self.ot_loss(
+                speech_weights.float(),
+                speech_out.float().transpose(0, 1).contiguous(),
+                text_weights.float(),
+                text_out.float().transpose(0, 1).contiguous()
+            )
+            
+        if self.save:
+            for i in range(B):
+                torch.save(
+                    {
+                        "speech_out": speech_out[:speech_lens[i], i, :-1].detach().cpu().clone(),
+                        "text_out": text_out[:text_lens[i], i, :-1].detach().cpu().clone(),
+                        "wass_loss": wass_loss[i].detach().cpu().clone()
+                    }, 
+                    self.debug_save_dir / f"{ids[i]}_last.pt"
+                )
+        
+        return wass_loss
+
+    def compute_wass_loss_old(self, encoder_out, net_input, lvl=-1, ids=None):
         
         speech_out, speech_lens, speech_padding_mask = self._get_speech_repr(encoder_out, lvl)
         text_out, text_lens, text_padding_mask = self._get_text_repr(net_input, encoder_out, lvl)
@@ -444,15 +501,6 @@ class CtcWassersteinCriterion(CtcCriterion):
         ctc_loss_sum = utils.item(
             sum(log.get("ctc_loss", 0) for log in logging_outputs)
         )
-        wass_loss_sum = utils.item(
-            sum(log.get("wass_loss", 0) for log in logging_outputs)
-        )
-        wass_emb_loss_sum = utils.item(
-            sum(log.get("wass_emb_loss", 0) for log in logging_outputs)
-        )
-        wass_mid_loss_sum = utils.item(
-            sum(log.get("wass_mid_loss", 0) for log in logging_outputs)
-        )
         ntokens = utils.item(sum(log.get("ntokens", 0) for log in logging_outputs))
 
         nsentences = utils.item(
@@ -472,27 +520,17 @@ class CtcWassersteinCriterion(CtcCriterion):
                 sample_size,
                 round=3,
             )
-        if wass_loss_sum != 0:
-            metrics.log_scalar(
-                "wass_loss",
-                wass_loss_sum / sample_size / math.log(2),
-                sample_size,
-                round=3,
-            )
-        if wass_emb_loss_sum != 0:
-            metrics.log_scalar(
-                "wass_emb_loss",
-                wass_emb_loss_sum / sample_size / math.log(2),
-                sample_size,
-                round=3,
-            )
-        if wass_mid_loss_sum != 0:
-            metrics.log_scalar(
-                "wass_mid_loss",
-                wass_mid_loss_sum / sample_size / math.log(2),
-                sample_size,
-                round=3,
-            )
+            
+        for k in logging_outputs[0].keys():
+            if k.startswith("wass_loss"):
+                wass_loss_sum = utils.item(sum(log.get(k, 0) for log in logging_outputs))
+                if wass_loss_sum != 0:
+                    metrics.log_scalar(
+                        k,
+                        wass_loss_sum / sample_size / math.log(2),
+                        sample_size,
+                        round=3,
+                    )
 
         num_predicted_sep = utils.item(
             sum(log.get("num_predicted_sep", 0) for log in logging_outputs)
@@ -524,43 +562,44 @@ class CtcWassersteinCriterion(CtcCriterion):
         metrics.log_scalar("ntokens", ntokens)
         metrics.log_scalar("nsentences", nsentences)
         
-        c_errors = sum(log.get("c_errors", 0) for log in logging_outputs)
-        metrics.log_scalar("_c_errors", c_errors)
-        c_total = sum(log.get("c_total", 0) for log in logging_outputs)
-        metrics.log_scalar("_c_total", c_total)
-        w_errors = sum(log.get("w_errors", 0) for log in logging_outputs)
-        metrics.log_scalar("_w_errors", w_errors)
-        wv_errors = sum(log.get("wv_errors", 0) for log in logging_outputs)
-        metrics.log_scalar("_wv_errors", wv_errors)
-        w_total = sum(log.get("w_total", 0) for log in logging_outputs)
-        metrics.log_scalar("_w_total", w_total)
+        if "wer" in logging_outputs[0]:
+            c_errors = sum(log.get("c_errors", 0) for log in logging_outputs)
+            metrics.log_scalar("_c_errors", c_errors)
+            c_total = sum(log.get("c_total", 0) for log in logging_outputs)
+            metrics.log_scalar("_c_total", c_total)
+            w_errors = sum(log.get("w_errors", 0) for log in logging_outputs)
+            metrics.log_scalar("_w_errors", w_errors)
+            wv_errors = sum(log.get("wv_errors", 0) for log in logging_outputs)
+            metrics.log_scalar("_wv_errors", wv_errors)
+            w_total = sum(log.get("w_total", 0) for log in logging_outputs)
+            metrics.log_scalar("_w_total", w_total)
 
-        if c_total > 0:
-            metrics.log_derived(
-                "uer",
-                lambda meters: safe_round(
-                    meters["_c_errors"].sum * 100.0 / meters["_c_total"].sum, 3
+            if c_total > 0:
+                metrics.log_derived(
+                    "uer",
+                    lambda meters: safe_round(
+                        meters["_c_errors"].sum * 100.0 / meters["_c_total"].sum, 3
+                    )
+                    if meters["_c_total"].sum > 0
+                    else float("nan"),
                 )
-                if meters["_c_total"].sum > 0
-                else float("nan"),
-            )
-        if w_total > 0:
-            metrics.log_derived(
-                "wer",
-                lambda meters: safe_round(
-                    meters["_w_errors"].sum * 100.0 / meters["_w_total"].sum, 3
+            if w_total > 0:
+                metrics.log_derived(
+                    "wer",
+                    lambda meters: safe_round(
+                        meters["_w_errors"].sum * 100.0 / meters["_w_total"].sum, 3
+                    )
+                    if meters["_w_total"].sum > 0
+                    else float("nan"),
                 )
-                if meters["_w_total"].sum > 0
-                else float("nan"),
-            )
-            metrics.log_derived(
-                "raw_wer",
-                lambda meters: safe_round(
-                    meters["_wv_errors"].sum * 100.0 / meters["_w_total"].sum, 3
+                metrics.log_derived(
+                    "raw_wer",
+                    lambda meters: safe_round(
+                        meters["_wv_errors"].sum * 100.0 / meters["_w_total"].sum, 3
+                    )
+                    if meters["_w_total"].sum > 0
+                    else float("nan"),
                 )
-                if meters["_w_total"].sum > 0
-                else float("nan"),
-            )
 
     @staticmethod
     def logging_outputs_can_be_summed() -> bool:
