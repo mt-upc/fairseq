@@ -1,6 +1,7 @@
 from functools import partial
 from typing import Optional
 from dataclasses import dataclass, field
+from omegaconf import II
 
 import torch
 from torch import nn
@@ -15,7 +16,7 @@ from fairseq.modules.fairseq_dropout import FairseqDropout
 @dataclass
 class AdaptorConfig(FairseqDataclass):
     embed_dim: int = field(
-        default=1024,
+        default=II("model.embed_dim"),
         metadata={"help": "dimension of the Adaptor"}
     )
     num_layers: int = field(

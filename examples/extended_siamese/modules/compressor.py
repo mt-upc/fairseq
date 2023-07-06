@@ -1,6 +1,7 @@
 import logging
 from dataclasses import dataclass, field
 from typing import Optional
+from omegaconf import II
 
 import torch
 import torch.nn as nn
@@ -135,7 +136,7 @@ class LevelCompressorConfig(FairseqDataclass):
 @dataclass
 class CompressorConfig(FairseqDataclass):
     embed_dim: int = field(
-        default=1024, metadata={"help": "embedding dimension for char-level compressor"}
+        default=II("model.embed_dim"), metadata={"help": "embedding dimension for char-level compressor"}
     )
     char_compression: Optional[LevelCompressorConfig] = field(
         default=None, metadata={"help": "configuration for char-level compression"}
