@@ -161,7 +161,7 @@ class CtcWassersteinCriterion(CtcCriterion):
             extra["wass_emb_loss"] = wass_emb_loss
             
         if self.ot_mid_weight > 0.0:
-            lvl = 5
+            lvl = 6
             wass_mid_loss = self.compute_wass_loss(encoder_out, net_input, lvl=lvl, ids=sample["example_id"])
             loss += self.ot_mid_weight * wass_mid_loss
             extra["wass_mid_loss"] = wass_mid_loss
