@@ -103,8 +103,8 @@ class CtcWassersteinCriterion(CtcCriterion):
         self.ot_scaling = cfg.ot_scaling
         self.ot_pos_weight = cfg.ot_pos_weight
         
-        self.ot_aux_layers = [int(l) for l in cfg.ot_aux_layers.split(",")]
-        self.ot_aux_weights = [float(w) for w in cfg.ot_aux_weights.split(",")]
+        self.ot_aux_layers = [int(l) for l in cfg.ot_aux_layers.split(",")] if cfg.ot_aux_layers else []
+        self.ot_aux_weights = [float(w) for w in cfg.ot_aux_weights.split(",")] if cfg.ot_aux_weights else []
         assert len(self.ot_aux_layers) == len(self.ot_aux_weights)
         
         self.eval_wer = cfg.eval_wer

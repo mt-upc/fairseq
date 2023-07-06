@@ -8,6 +8,7 @@ from argparse import Namespace
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import List, Optional
+from omegaconf import II
 
 import torch
 from fairseq.data import (
@@ -98,6 +99,10 @@ class SpeechTextJointToTextTaskConfig(SpeechToTextTaskConfig):
     infer_target_lang: str = field(
         default="",
         metadata={"help": "target language for inference"},
+    )
+    ot_aux_layers: str = field(
+        default=II("criterion.ot_aux_layers"),
+        metadata={"help": "auxiliary layers for OT loss"},
     )
 
 
