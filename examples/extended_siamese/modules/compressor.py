@@ -1,6 +1,7 @@
 import logging
 from dataclasses import dataclass, field
 from typing import Optional
+from omegaconf import II
 
 import torch
 import torch.nn as nn
@@ -35,7 +36,7 @@ class CompressionAdaptor(nn.Module):
 
 
 class CompressionTransformer(nn.Module):
-    def __ini__(self, embed_dim, num_layers, dropout_rate):
+    def __init__(self, embed_dim, num_layers, dropout_rate):
         super().__init__()
 
         cfg = TransformerConfig()
@@ -61,7 +62,7 @@ class CompressionTransformer(nn.Module):
         for layer in self.layers:
             x = layer(x, padding_mask)
 
-        x_words = x_words.transpose(0, 1)
+        x = x.transpose(0, 1)
 
         return x
 
@@ -135,7 +136,7 @@ class LevelCompressorConfig(FairseqDataclass):
 @dataclass
 class CompressorConfig(FairseqDataclass):
     embed_dim: int = field(
-        default=1024, metadata={"help": "embedding dimension for char-level compressor"}
+        default=II("model.embed_dim"), metadata={"help": "embedding dimension for char-level compressor"}
     )
     char_compression: Optional[LevelCompressorConfig] = field(
         default=None, metadata={"help": "configuration for char-level compression"}
@@ -205,15 +206,11 @@ class Compressor(nn.Module):
             y = torch.max(x, dim=1)[0]
 
         elif fn == "attention":
-            if lvl == "char":
-                attention_pooling = self.char_attention_pooling
-            else:
-                attention_pooling = self.token_attention_pooling
-
             mask = lengths_to_padding_mask(lens)
-            y = torch.zeros(x.size(0), x.size(-1), dtype=x.dtype, device=x.device)
-            valid_mask = mask.eq(0).any(dim=1)
-            y[valid_mask] = attention_pooling(x[valid_mask], mask[valid_mask])
+            if lvl == "char":
+                y = self.char_attention_pooling(x, mask)
+            else:
+                y = self.token_attention_pooling(x, mask)
 
         return y
 
@@ -250,29 +247,38 @@ class Compressor(nn.Module):
         compr_preds = pad_sequence(
             compr_preds, batch_first=True, padding_value=self.blank_idx
         )
+        valid_chars = compr_preds.ne(self.blank_idx)
 
         # create a tensor to fill-in
-        n = counts.size(1)
-        m = counts.max()
-        x_compr = torch.zeros(B, n, m, D, device=x.device, dtype=x.dtype)
+        n = counts.size(1) # max number of predictions for the sequences
+        m = counts[valid_chars].max().item() # max length of the non-blank predictions
+        x_chars = torch.zeros(B, n, m, D, device=x.device, dtype=x.dtype)
 
         for i in range(B):
             x_chars_i = torch.split(x[i], counts_list[i].tolist()) # Tuple[2d tensor]
             x_chars_i = pad_sequence(
                 x_chars_i, batch_first=True, padding_value=0
             )  # n_i x m_i x D
-            x_compr[i, : x_chars_i.size(0), : x_chars_i.size(1)] = x_chars_i
+            # we dont care about the length of the blank predictions
+            if x_chars_i.size(1) > m:
+                x_chars_i = x_chars_i[:, :m]
+            x_chars[i, :x_chars_i.size(0), :x_chars_i.size(1)] = x_chars_i
 
-        x_compr = x_compr.view(B * n, m, D)
+        x_chars = x_chars.view(B * n, m, D)
         counts = counts.view(B * n)
+        valid_chars = valid_chars.view(B * n)
         char_padding_mask = lengths_to_padding_mask(counts)
-        valid_examples = char_padding_mask.eq(0).any(dim=-1)
 
-        x_compr = self.pre_process(
-            x_compr, char_padding_mask, valid_examples, self.char_pre_processor
+        x_chars = self.pre_process(
+            x_chars, char_padding_mask, valid_chars, self.char_pre_processor
         )
-
-        x_compr = self.pool(x_compr, lens=counts, lvl="char")  # B * n x D
+        
+        x_compr = torch.zeros(B * n, D, device=x.device, dtype=x.dtype)
+        x_compr[valid_chars] = self.pool(
+            x_chars[valid_chars],
+            lens=counts[valid_chars],
+            lvl="char"
+        )  # B * n x D
 
         x_compr = x_compr.view(B, n, D)  # B x n x D
 
@@ -351,7 +357,7 @@ class Compressor(nn.Module):
         # create a tensor to fill-in
         n = token_lengths.size(1)
         m = token_lengths.max()
-        x_compr = torch.zeros(B, n, m, D, device=x.device, dtype=x.dtype)
+        x_tokens = torch.zeros(B, n, m, D, device=x.device, dtype=x.dtype)
 
         for i in range(B):
             if lens[i] > 0:
@@ -361,18 +367,23 @@ class Compressor(nn.Module):
             x_tokens_i = pad_sequence(
                 x_tokens_i, batch_first=True, padding_value=0
             )  # n_i x m_i x D
-            x_compr[i, : x_tokens_i.size(0), : x_tokens_i.size(1)] = x_tokens_i
+            x_tokens[i, : x_tokens_i.size(0), : x_tokens_i.size(1)] = x_tokens_i
 
-        x_compr = x_compr.view(B * n, m, D)
+        x_tokens = x_tokens.view(B * n, m, D)
         token_lengths = token_lengths.view(B * n)
         token_padding_mask = lengths_to_padding_mask(token_lengths)
-        valid_examples = token_padding_mask.eq(0).any(dim=-1)
+        valid_tokens = token_padding_mask.eq(0).any(dim=-1)
 
-        x_compr = self.pre_process(
-            x_compr, token_padding_mask, valid_examples, self.token_pre_processor
+        x_tokens = self.pre_process(
+            x_tokens, token_padding_mask, valid_tokens, self.token_pre_processor
         )
 
-        x_compr = self.pool(x_compr, lens=token_lengths, lvl="token")  # B * n x D
+        x_compr = torch.zeros(B * n, D, device=x.device, dtype=x.dtype)
+        x_compr[valid_tokens] = self.pool(
+            x_tokens[valid_tokens],
+            lens=token_lengths[valid_tokens],
+            lvl="token"
+        )  # B * n x D
 
         x_compr = x_compr.view(B, n, D)  # B x num_words x D
         x_compr_lens = (token_lengths.view(B, -1) != 0).sum(dim=-1)  # B

@@ -29,6 +29,9 @@ class SiameseSpeechTextTask(SpeechTextJointToTextTask):
         self.tgt_dict = tgt_dict
         self.data_cfg = S2TJointDataConfig(Path(cfg.data) / cfg.config_yaml)
         self.cfg = cfg
+        self.ot_aux_layers = []
+        if hasattr(self.cfg, "ot_aux_layers") and self.cfg.ot_aux_layers:
+            self.ot_aux_layers = [int(l) for l in self.cfg.ot_aux_layers.split(",")]
 
     @classmethod
     def setup_task(cls, cfg, **kwcfg):
@@ -84,6 +87,7 @@ class SiameseSpeechTextTask(SpeechTextJointToTextTask):
             append_eos=True,
             use_src_lang_id=self.data_cfg.prepend_src_lang_tag,
         )
+        s2t_dataset.aux_layers = self.ot_aux_layers
         self.datasets[split] = s2t_dataset
 
     @property

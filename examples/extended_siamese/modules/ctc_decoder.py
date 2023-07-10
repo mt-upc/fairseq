@@ -1,6 +1,6 @@
 import logging
 from dataclasses import dataclass, field
-from omegaconf import MISSING
+from omegaconf import II, MISSING
 
 import torch.nn as nn
 
@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class CTCDecoderConfig(FairseqDataclass):
     embed_dim: int = field(
-        default=1024,
+        default=II("model.embed_dim"),
         metadata={"help": "embedding dimension"}
     )
     dictionary_path: str = field(

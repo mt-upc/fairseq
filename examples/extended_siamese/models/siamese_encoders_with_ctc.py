@@ -37,6 +37,12 @@ from examples.extended_siamese.modules import (
 
 logger = logging.getLogger(__name__)
 
+def _hasattr(obj, name):
+    try:
+        return hasattr(obj, name) and getattr(obj, name) is not None
+    except:
+        return False
+
 
 class DummyDecoder(FairseqDecoder):
     def __init__(self, dictionary=None):
@@ -126,6 +132,10 @@ class SiameseConfig(FairseqDataclass):
     context_encoder: Optional[ContextEncoderConfig] = None
     ctc_decoder: Optional[CTCDecoderConfig] = None
     compressor: Optional[CompressorConfig] = None
+    embed_dim: int = field(
+        default=1024,
+        metadata={"help": "model dimension"}
+    )
 
 class SiameseSpeechTextEncoders(FairseqEncoder):
     def __init__(
@@ -252,7 +262,7 @@ class SiameseSpeechTextEncoders(FairseqEncoder):
         context_encoder = ContextEncoder(cfg, return_ln=True)
 
         context_encoder.layers.load_state_dict(text_encoder.layers.state_dict())
-        if hasattr(text_encoder, "layer_norm"):
+        if _hasattr(text_encoder, "layer_norm"):
             context_encoder.layer_norm.load_state_dict(text_encoder.layer_norm.state_dict())
         
         return context_encoder
@@ -330,7 +340,7 @@ class SiameseSpeechTextEncoders(FairseqEncoder):
         
     def forward_adaptor(self, speech_out):
         
-        if not hasattr(self, "adaptor"):
+        if not _hasattr(self, "adaptor"):
             return speech_out
         
         if "modified_out" in speech_out:
@@ -360,7 +370,7 @@ class SiameseSpeechTextEncoders(FairseqEncoder):
         return speech_out
 
     def forward_embedder(self, speech_out):
-        if not hasattr(self, "speech_embedder"):
+        if not _hasattr(self, "speech_embedder"):
             return speech_out
         
         if "modified_out" in speech_out:
@@ -388,7 +398,7 @@ class SiameseSpeechTextEncoders(FairseqEncoder):
         return speech_out
     
     def forward_context(self, speech_out):
-        if not hasattr(self, "context_encoder"):
+        if not _hasattr(self, "context_encoder"):
             return speech_out
         
         if "modified_out" in speech_out:
@@ -424,7 +434,7 @@ class SiameseSpeechTextEncoders(FairseqEncoder):
     
     def forward_compressor(self, decoder_out, speech_out):
         
-        if not hasattr(self, "compressor"):
+        if not _hasattr(self, "compressor"):
             return speech_out
         
         with torch.no_grad():
@@ -455,14 +465,14 @@ class SiameseSpeechTextEncoders(FairseqEncoder):
         return speech_out
     
     def forward_text(self, src_txt_tokens, src_txt_lengths):
-        if not hasattr(self, "text_encoder"):
+        if not _hasattr(self, "text_encoder"):
             return None
         if self.text_encoder.training:
             self.text_encoder.eval()
         return self.text_encoder(src_txt_tokens, src_txt_lengths, return_all_hiddens=True)
     
     def _freeze_text_encoder(self):
-        if hasattr(self, "text_encoder"):
+        if _hasattr(self, "text_encoder"):
             logger.info(f"Freezing text encoder ...")
             for n, p in self.text_encoder.named_parameters():
                 logger.info(f"- freezing {n}")
@@ -495,7 +505,7 @@ class SiameseSpeechTextEncoders(FairseqEncoder):
                     layer.dropout3.p = 0.0
                     
     def _maybe_freeze_context_encoder(self):
-        if hasattr(self, "context_encoder") and self.cfg.context_encoder.freeze:
+        if _hasattr(self, "context_encoder") and self.cfg.context_encoder.freeze:
             logger.info(f"Freezing context encoder ...")
             for n, p in self.context_encoder.named_parameters():
                 logger.info(f"- freezing {n}")
@@ -513,11 +523,11 @@ class SiameseEncodersWithCTC(FairseqEncoderDecoderModel):
     @classmethod
     def build_encoder(cls, cfg: SiameseConfig, src_dict):
         spch_encoder = SiameseSpeechTextEncoders.build_speech_encoder(cfg.speech_encoder)
-        text_encoder = SiameseSpeechTextEncoders.build_text_encoder(cfg.text_encoder, src_dict) if hasattr(cfg, "text_encoder") else None
-        adaptor = SiameseSpeechTextEncoders.build_adaptor(cfg.adaptor) if hasattr(cfg, "adaptor") else None
-        context_encoder = SiameseSpeechTextEncoders.build_context_encoder(cfg.context_encoder, text_encoder) if hasattr(cfg, "context_encoder") else None
-        speech_embedder = SiameseSpeechTextEncoders.build_embedder(cfg.speech_embedder, text_encoder) if hasattr(cfg, "speech_embedder") else None
-        compressor = SiameseSpeechTextEncoders.build_compressor(cfg.compressor) if hasattr(cfg, "compressor") else None
+        text_encoder = SiameseSpeechTextEncoders.build_text_encoder(cfg.text_encoder, src_dict) if _hasattr(cfg, "text_encoder") else None
+        adaptor = SiameseSpeechTextEncoders.build_adaptor(cfg.adaptor) if _hasattr(cfg, "adaptor") else None
+        context_encoder = SiameseSpeechTextEncoders.build_context_encoder(cfg.context_encoder, text_encoder) if _hasattr(cfg, "context_encoder") else None
+        speech_embedder = SiameseSpeechTextEncoders.build_embedder(cfg.speech_embedder, text_encoder) if _hasattr(cfg, "speech_embedder") else None
+        compressor = SiameseSpeechTextEncoders.build_compressor(cfg.compressor) if _hasattr(cfg, "compressor") else None
         
         encoder = SiameseSpeechTextEncoders(
             cfg,
@@ -563,7 +573,7 @@ class SiameseEncodersWithCTC(FairseqEncoderDecoderModel):
         """Get normalized probabilities (or log probs) from a net's output."""
         assert not isinstance(self.decoder, DummyDecoder)
 
-        if hasattr(self, "adaptive_softmax") and self.adaptive_softmax is not None:
+        if _hasattr(self, "adaptive_softmax"):
             if sample is not None:
                 assert "target" in sample
                 target = sample["target"]

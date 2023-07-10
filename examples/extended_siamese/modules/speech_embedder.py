@@ -1,5 +1,6 @@
 from dataclasses import dataclass, field
 import math
+from omegaconf import II
 
 import torch
 from torch import nn
@@ -24,10 +25,10 @@ class SpeechEmbedderConfig(FairseqDataclass):
         default=False, metadata={"help": "scale embeddings by sqrt(dimension)"}
     )
     embed_dim: int = field(
-        default=1024, metadata={"help": "embedding dimension"}
+        default=II("model.embed_dim"), metadata={"help": "embedding dimension"}
     )
     max_source_positions: int = field(
-        default=1024, metadata={"help": "maximum sequence length for learned positional embeddings"}
+        default=II("task.max_positions_text"), metadata={"help": "maximum sequence length for learned positional embeddings"}
     )
     padding_idx: int = field(
         default=1, metadata={"help": "padding index"}
