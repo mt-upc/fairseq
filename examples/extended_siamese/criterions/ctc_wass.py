@@ -149,33 +149,6 @@ class CtcWassersteinCriterion(CtcCriterion):
             )
             loss += self.ctc_weight * ctc_loss
 
-<<<<<<< HEAD
-        lvl = None
-        if self.ot_weight > 0.0:
-            lvl = -1
-            wass_loss = self.compute_wass_loss(encoder_out, net_input, lvl=lvl, ids=sample["example_id"])
-            loss += self.ot_weight * wass_loss
-            extra["wass_loss"] = wass_loss
-        elif self.ot_emb_weight > 0.0 and not model.training:
-            lvl = -1
-            speech_out = model.encoder.forward_context(encoder_out[0])
-            encoder_out = (speech_out, encoder_out[1])
-            wass_loss = self.compute_wass_loss(encoder_out, net_input, lvl=lvl, ids=sample["example_id"])
-            extra["wass_loss"] = wass_loss
-
-        if self.ot_emb_weight > 0.0:
-            lvl = 0
-            wass_emb_loss = self.compute_wass_loss(encoder_out, net_input, lvl=lvl, ids=sample["example_id"])
-            loss += self.ot_emb_weight * wass_emb_loss
-            extra["wass_emb_loss"] = wass_emb_loss
-            
-        if self.ot_mid_weight > 0.0:
-            lvl = 6
-            wass_mid_loss = self.compute_wass_loss(encoder_out, net_input, lvl=lvl, ids=sample["example_id"])
-            loss += self.ot_mid_weight * wass_mid_loss
-            extra["wass_mid_loss"] = wass_mid_loss
-            
-=======
         speech_out, speech_lens, speech_padding_mask = self._get_speech_repr(encoder_out, lvl=-1)
         text_out, text_lens, text_padding_mask = self._get_text_repr(net_input, encoder_out, lvl=-1)
 
@@ -201,7 +174,6 @@ class CtcWassersteinCriterion(CtcCriterion):
         for i, layer_id in enumerate(self.ot_aux_layers):
             extra[f"wass_loss_{layer_id}"] = wass_loss[B*(i+1):B*(i+2)].sum()
             loss += self.ot_aux_weights[i] * extra[f"wass_loss_{layer_id}"]
->>>>>>> zero-shot-st_batched
     
         logging_output = {
             "loss": utils.item(loss.data)
