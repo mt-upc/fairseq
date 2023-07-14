@@ -144,8 +144,14 @@ class SpeechToTextJointDataset(SpeechToTextDataset):
             self.alignment = [
                 [float(s) for s in sample.split()] for sample in alignment
             ]
+            
         self.aux_layers = []
-        self.n_layers = 12 # TODO: fix this (bad hardcoding)
+        if hasattr(cfg, "mt_model_name") and cfg.mt_model_name is not None:
+            self.mt_model_name = cfg.mt_model_name
+            if "600M" in self.mt_model_name:
+                self.n_layers = 12
+            else:
+                self.n_layers = 24
 
     def get_tokenized_src_text(self, index: int):
         text = self.tokenize(self.src_pre_tokenizer, self.src_texts[index])

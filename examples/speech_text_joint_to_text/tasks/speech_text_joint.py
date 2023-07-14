@@ -101,10 +101,9 @@ class SpeechTextJointToTextTaskConfig(SpeechToTextTaskConfig):
         metadata={"help": "target language for inference"},
     )
     ot_aux_layers: str = field(
-        default=II("criterion.ot_aux_layers"),
+        default=II("criterion.ot_teacher_aux_layers"),
         metadata={"help": "auxiliary layers for OT loss"},
     )
-
 
 
 @register_task("speech_text_joint_to_text", dataclass=SpeechTextJointToTextTaskConfig)

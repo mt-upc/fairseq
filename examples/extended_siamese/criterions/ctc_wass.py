@@ -74,9 +74,13 @@ class CtcWassersteinCriterionConfig(CtcCriterionConfig):
         default="",
         metadata={"help": "debug save dir."},
     )
-    ot_aux_layers: str = field(
+    ot_student_aux_layers: str = field(
         default="",
-        metadata={"help": "comma-separated auxiliary layers for OT loss."},
+        metadata={"help": "comma-separated student auxiliary layers for OT loss."},
+    )
+    ot_teacher_aux_layers: str = field(
+        default="",
+        metadata={"help": "comma-separated teacher auxiliary layers for OT loss."},
     )
     ot_aux_weights: str = field(
         default="",
@@ -110,9 +114,10 @@ class CtcWassersteinCriterion(CtcCriterion):
         self.ot_pos_weight = cfg.ot_pos_weight
         self.ctc_sep_weight = cfg.ctc_sep_weight
         
-        self.ot_aux_layers = [int(l) for l in cfg.ot_aux_layers.split(",")] if cfg.ot_aux_layers else []
+        self.ot_student_aux_layers = [int(l) for l in cfg.ot_student_aux_layers.split(",")] if cfg.ot_student_aux_layers else []
+        self.ot_teacher_aux_layers = [int(l) for l in cfg.ot_teacher_aux_layers.split(",")] if cfg.ot_teacher_aux_layers else []
         self.ot_aux_weights = [float(w) for w in cfg.ot_aux_weights.split(",")] if cfg.ot_aux_weights else []
-        assert len(self.ot_aux_layers) == len(self.ot_aux_weights)
+        assert len(self.ot_student_aux_layers) == len(self.ot_aux_weights) == len(self.ot_teacher_aux_layers)
         
         self.eval_wer = cfg.eval_wer
         
@@ -148,7 +153,7 @@ class CtcWassersteinCriterion(CtcCriterion):
 
         loss = 0.0
         extra = {"ctc_loss": 0.0, "wass_loss": 0.0}
-        for layer_id in self.ot_aux_layers:
+        for layer_id in self.ot_student_aux_layers:
             extra[f"wass_loss_{layer_id}"] = 0.0
 
         if self.ctc_weight > 0.0 or self.ctc_sep_weight > 0.0:
@@ -161,20 +166,20 @@ class CtcWassersteinCriterion(CtcCriterion):
             if self.ctc_sep_weight > 0.0:
                 loss += self.ctc_sep_weight * extra["ctc_sep_loss"]
 
-        speech_out, speech_lens, speech_padding_mask = self._get_speech_repr(encoder_out, lvl=-1)
-        text_out, text_lens, text_padding_mask = self._get_text_repr(net_input, encoder_out, lvl=-1)
+        speech_out, speech_lens, speech_padding_mask = self._get_speech_repr(encoder_out)
+        text_out, text_lens, text_padding_mask = self._get_text_repr(net_input, encoder_out)
 
         m = len(self.ot_aux_weights) + 1
         B = speech_out.size(1)
         
-        speech_out = torch.cat([speech_out, *[encoder_out[0]["context_ln_results"][layer_id] for layer_id in self.ot_aux_layers]], dim=1)
+        speech_out = torch.cat([speech_out, *[encoder_out[0]["context_ln_results"][layer_id] for layer_id in self.ot_student_aux_layers]], dim=1)
         speech_lens = speech_lens.repeat(m)
         speech_padding_mask = speech_padding_mask.repeat(m, 1)
         
         if "src_txt_enc" in net_input:
-            text_out = torch.cat([text_out, *[net_input["src_txt_ln_results"][layer_id].transpose(0, 1) for layer_id in self.ot_aux_layers]], dim=1)
+            text_out = torch.cat([text_out, *[net_input["src_txt_ln_results"][layer_id].transpose(0, 1) for layer_id in self.ot_teacher_aux_layers]], dim=1)
         else:   
-            text_out = torch.cat([text_out, *[encoder_out[1]["ln_results"][layer_id] for layer_id in self.ot_aux_layers]], dim=1)
+            text_out = torch.cat([text_out, *[encoder_out[1]["ln_results"][layer_id] for layer_id in self.ot_teacher_aux_layers]], dim=1)
         text_lens = text_lens.repeat(m)
         text_padding_mask = text_padding_mask.repeat(m, 1)
         
@@ -183,7 +188,7 @@ class CtcWassersteinCriterion(CtcCriterion):
         extra["wass_loss"] = wass_loss[:B].sum()
         loss += self.ot_weight * extra["wass_loss"]
         
-        for i, layer_id in enumerate(self.ot_aux_layers):
+        for i, layer_id in enumerate(self.ot_student_aux_layers):
             extra[f"wass_loss_{layer_id}"] = wass_loss[B*(i+1):B*(i+2)].sum()
             loss += self.ot_aux_weights[i] * extra[f"wass_loss_{layer_id}"]
     
@@ -207,7 +212,7 @@ class CtcWassersteinCriterion(CtcCriterion):
             else sample["ntokens"],
         }
         
-        for i, layer_id in enumerate(self.ot_aux_layers):
+        for i, layer_id in enumerate(self.ot_student_aux_layers):
             logging_output[f"wass_loss_{layer_id}"] = utils.item(extra[f"wass_loss_{layer_id}"].data) if extra[f"wass_loss_{layer_id}"] != 0.0 else 0.0
         
         if net_output is not None:
@@ -374,46 +379,25 @@ class CtcWassersteinCriterion(CtcCriterion):
             logging_output["c_total"] = c_len
         return logging_output
     
-    def _get_speech_repr(self, encoder_out, lvl=-1):
-        
-        if lvl == -1:
-            speech_out = encoder_out[0]["context_out"][0].transpose(0, 1)  # S x B x D
-        else:
-            assert lvl in range(len(encoder_out[0]["context_ln_results"]))
-            speech_out = encoder_out[0]["context_ln_results"][lvl]  # S x B x D
-            
+    def _get_speech_repr(self, encoder_out):
+        speech_out = encoder_out[0]["context_out"][0].transpose(0, 1)  # S x B x D    
         speech_lens = encoder_out[0]["context_out_lengths"][0] # torch.Size([B])
         speech_padding_mask = encoder_out[0]["context_padding_mask"][0] # B x S
-        
         if speech_padding_mask is None:
             speech_padding_mask = lengths_to_padding_mask(speech_lens)
-        
         return speech_out, speech_lens, speech_padding_mask
     
-    def _get_text_repr(self, net_input, encoder_out, lvl=-1):
-        
+    def _get_text_repr(self, net_input, encoder_out):
         if "src_txt_enc" in net_input:
-            if lvl == -1:
-                text_out = net_input["src_txt_enc"].transpose(0, 1) # T x B x D
-            else:
-                assert lvl in range(len(net_input["src_txt_ln_results"]))
-                text_out = net_input["src_txt_ln_results"][lvl].transpose(0, 1)  # T x B x D
-                
+            text_out = net_input["src_txt_enc"].transpose(0, 1) # T x B x D    
             text_lens = net_input["src_txt_lengths"] # torch.Size([B])
             text_padding_mask = lengths_to_padding_mask(text_lens) # B x T
         else:
-            if lvl == -1:
-                text_out = encoder_out[1]["encoder_out"][0]  # T x B x D
-            else:
-                assert lvl in range(len(encoder_out[1]["ln_results"]))
-                text_out = encoder_out[1]["ln_results"][lvl]  # T x B x D
-
+            text_out = encoder_out[1]["encoder_out"][0]  # T x B x D
             text_lens = encoder_out[1]["src_lengths"][0].squeeze(-1) # torch.Size([B])
             text_padding_mask = encoder_out[1]["encoder_padding_mask"][0] # B x T
-            
             if text_padding_mask is None:
                 text_padding_mask = lengths_to_padding_mask(text_lens)
-        
         return text_out, text_lens, text_padding_mask
     
     def compute_wass_loss(self, speech_out, speech_lens, speech_padding_mask, text_out, text_lens, text_padding_mask, ids=None):
