@@ -42,6 +42,10 @@ class CtcWassersteinCriterionConfig(CtcCriterionConfig):
         default=1.0,
         metadata={"help": "Weight for OT positional embeddings"},
     )
+    ctc_sep_weight: float = field(
+        default=0.0,
+        metadata={"help": "Weight for CTC separator loss"},
+    )
     ot_distribution: ChoiceEnum(["uniform", "norm"]) = field(
         default="uniform",
         metadata={"help": "distribution of the weights in the OT loss"},
@@ -91,6 +95,8 @@ class CtcWassersteinCriterion(CtcCriterion):
         super().__init__(cfg, task)
         
         self.sep_idx = task.target_dictionary.index("|")
+        self.unk_idx = task.target_dictionary.unk()
+        self.bos_idx = task.target_dictionary.bos()
         
         assert self.blank_idx == self.pad_idx
 
@@ -102,6 +108,7 @@ class CtcWassersteinCriterion(CtcCriterion):
         self.ot_blur = cfg.ot_blur
         self.ot_scaling = cfg.ot_scaling
         self.ot_pos_weight = cfg.ot_pos_weight
+        self.ctc_sep_weight = cfg.ctc_sep_weight
         
         self.ot_aux_layers = [int(l) for l in cfg.ot_aux_layers.split(",")] if cfg.ot_aux_layers else []
         self.ot_aux_weights = [float(w) for w in cfg.ot_aux_weights.split(",")] if cfg.ot_aux_weights else []
@@ -118,9 +125,10 @@ class CtcWassersteinCriterion(CtcCriterion):
 
         logging.info(f"*** Loss function ***")
         logging.info(f"ctc_weight = {self.ctc_weight}")
+        logging.info(f"ctc_sep_weight = {self.ctc_sep_weight}")
         logging.info(f"ot_weight = {self.ot_weight}")
         logging.info(f"ot_pos_weight = {self.ot_pos_weight}")
-        logging.info(f"ot_loss = {self.ot_loss}, ot_p = {self.ot_p}, ot_blur = {self.ot_blur}, ot_scaling = {self.ot_scaling}")
+        logging.info(f"aux_weights = {self.ot_aux_weights}")
 
         self.ot_loss = SamplesLoss(
             loss=cfg.ot_loss, p=self.ot_p, blur=self.ot_blur, scaling=self.ot_scaling
@@ -143,11 +151,15 @@ class CtcWassersteinCriterion(CtcCriterion):
         for layer_id in self.ot_aux_layers:
             extra[f"wass_loss_{layer_id}"] = 0.0
 
-        if self.ctc_weight > 0.0:
+        if self.ctc_weight > 0.0 or self.ctc_sep_weight > 0.0:
             ctc_loss, extra = self.compute_ctc_loss(
                 model, net_output, encoder_out, sample["target"], extra
             )
-            loss += self.ctc_weight * ctc_loss
+            if self.ctc_weight > 0.0:
+                loss += self.ctc_weight * ctc_loss
+            
+            if self.ctc_sep_weight > 0.0:
+                loss += self.ctc_sep_weight * extra["ctc_sep_loss"]
 
         speech_out, speech_lens, speech_padding_mask = self._get_speech_repr(encoder_out, lvl=-1)
         text_out, text_lens, text_padding_mask = self._get_text_repr(net_input, encoder_out, lvl=-1)
@@ -181,6 +193,9 @@ class CtcWassersteinCriterion(CtcCriterion):
             else 0.0,  # * sample['ntokens'],
             "ctc_loss": utils.item(extra["ctc_loss"].data)
             if extra["ctc_loss"] != 0.0
+            else 0.0,
+            "ctc_sep_loss": utils.item(extra["ctc_sep_loss"].data)
+            if extra["ctc_sep_loss"] != 0.0
             else 0.0,
             "wass_loss": utils.item(extra["wass_loss"].data)
             if extra["wass_loss"] != 0.0
@@ -251,22 +266,52 @@ class CtcWassersteinCriterion(CtcCriterion):
             num_predicted_sep += sep_preds[:, i].unique_consecutive().sum()
         num_correct_sep = (targets_flat == self.sep_idx).sum()
 
-        with torch.backends.cudnn.flags(enabled=False):
-            ctc_loss = F.ctc_loss(
-                lprobs,
-                targets_flat,
-                input_lengths,
-                target_lengths,
-                blank=self.blank_idx,
-                reduction="sum",
-                zero_infinity=self.zero_infinity,
-            )
-
-        extra["ctc_loss"] = ctc_loss
-        extra["lprobs_ctc"] = lprobs
-        extra["input_lengths"] = input_lengths
         extra["num_predicted_sep"] = num_predicted_sep
         extra["num_correct_sep"] = num_correct_sep
+        
+        if self.ctc_weight:
+            with torch.backends.cudnn.flags(enabled=False):
+                ctc_loss = F.ctc_loss(
+                    lprobs,
+                    targets_flat,
+                    input_lengths,
+                    target_lengths,
+                    blank=self.blank_idx,
+                    reduction="sum",
+                    zero_infinity=self.zero_infinity,
+                )
+            
+            extra["ctc_loss"] = ctc_loss
+        
+        if self.eval_wer:
+            extra["lprobs_ctc"] = lprobs
+            extra["input_lengths"] = input_lengths
+
+        extra["ctc_sep_loss"] = 0
+        if self.ctc_sep_weight > 0.0:
+            targets_flat_sep = targets_flat.clone()
+            targets_flat_sep[targets_flat_sep != self.sep_idx] = self.unk_idx
+            
+            # Create a mask to separate indices to combine
+            combine_mask = torch.ones(lprobs.size(2), dtype=bool, device=lprobs.device)
+            combine_mask[[self.blank_idx, self.bos_idx, self.eos_idx, self.sep_idx]] = False
+            
+            # Calculate combined log-probabilities
+            lprobs_sep = lprobs[:, :, :self.sep_idx + 1].clone()
+            lprobs_sep[:, :, self.unk_idx] = torch.logsumexp(lprobs[:, :, combine_mask], dim=-1)
+
+            with torch.backends.cudnn.flags(enabled=False):
+                ctc_sep_loss = F.ctc_loss(
+                    lprobs_sep,
+                    targets_flat_sep,
+                    input_lengths,
+                    target_lengths,
+                    blank=self.blank_idx,
+                    reduction="sum",
+                    zero_infinity=self.zero_infinity,
+                )
+                
+            extra["ctc_sep_loss"] = ctc_sep_loss
 
         return ctc_loss, extra
     
@@ -437,6 +482,9 @@ class CtcWassersteinCriterion(CtcCriterion):
         ctc_loss_sum = utils.item(
             sum(log.get("ctc_loss", 0) for log in logging_outputs)
         )
+        ctc_sep_loss_sum = utils.item(
+            sum(log.get("ctc_sep_loss", 0) for log in logging_outputs)
+        )
         ntokens = utils.item(sum(log.get("ntokens", 0) for log in logging_outputs))
 
         nsentences = utils.item(
@@ -453,6 +501,14 @@ class CtcWassersteinCriterion(CtcCriterion):
             metrics.log_scalar(
                 "ctc_loss",
                 ctc_loss_sum / sample_size / math.log(2),
+                sample_size,
+                round=3,
+            )
+            
+        if ctc_sep_loss_sum != 0.0:
+            metrics.log_scalar(
+                "ctc_sep_loss",
+                ctc_sep_loss_sum / sample_size / math.log(2),
                 sample_size,
                 round=3,
             )
