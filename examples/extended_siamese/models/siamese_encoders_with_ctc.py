@@ -2,7 +2,7 @@
 
 import logging
 from dataclasses import dataclass, field
-from omegaconf import II, OmegaConf, MISSING
+from omegaconf import  OmegaConf, MISSING
 from typing import Optional
 
 import torch
@@ -57,7 +57,7 @@ class SpeechEncoderConfig:
     final_dropout: float = field(
         default=0.0,
         metadata={"help": "speech encoder final dropout"}
-    )
+    ) # TODO: this is not used. Remove later.
     dropout: float = field(
         default=0.0,
         metadata={"help": "speech encoder dropout"}
@@ -176,8 +176,10 @@ class SiameseSpeechTextEncoders(FairseqEncoder):
     
         ckpt = torch.load(cfg.path)
         
-        w2v_args = ckpt["args"]
-        w2v_model_config = convert_namespace_to_omegaconf(w2v_args).model
+        if "args" in ckpt and ckpt["args"] is not None:
+            w2v_model_config = convert_namespace_to_omegaconf(ckpt["args"]).model
+        else:
+            w2v_model_config = OmegaConf.create(ckpt["cfg"]).model
         
         OmegaConf.set_struct(w2v_model_config, False)
         w2v_model_config.final_dropout = cfg.final_dropout

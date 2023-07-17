@@ -2,8 +2,7 @@
 
 import logging
 from dataclasses import dataclass, field
-from omegaconf import MISSING
-from types import SimpleNamespace
+from omegaconf import OmegaConf, MISSING
 
 import torch
 
@@ -17,14 +16,6 @@ from examples.extended_siamese.models.siamese_encoders_with_ctc import SiameseEn
 
 logger = logging.getLogger(__name__)
 
-
-def dict_to_obj(d):
-    if isinstance(d, dict):
-        return SimpleNamespace(**{k: dict_to_obj(v) for k, v in d.items()})
-    elif isinstance(d, (list, tuple)):
-        return [dict_to_obj(x) for x in d]
-    else:
-        return d
 
 @dataclass
 class SiameseZeroShotS2TModelConfig(FairseqDataclass):
@@ -54,7 +45,7 @@ class SiameseZeroShotS2TModel(BaseFairseqModel):
         ckpt = torch.load(cfg.encoder_path)
         model_args = ckpt["cfg"]["model"]
         model_args["remove"] = True
-        model_args = dict_to_obj(model_args)
+        model_args = OmegaConf.create(model_args)
         task.src_dict = task.tgt_dict
         encoder = SiameseEncodersWithCTC.build_model(model_args, task)
         if not cfg.not_load_submodules:
@@ -89,7 +80,7 @@ class SiameseZeroShotS2TModel(BaseFairseqModel):
     
     @classmethod
     def build_model(cls, cfg, task):
-        cfg = SimpleNamespace(**cfg)
+        cfg = OmegaConf.create(cfg)
         encoder = cls.build_encoder(cfg, task)
         decoder = cls.build_decoder(cfg, task)
         return cls(encoder, decoder)
