@@ -186,7 +186,8 @@ class CtcWassersteinCriterion(CtcCriterion):
         wass_loss = self.compute_wass_loss(speech_out, speech_lens, speech_padding_mask, text_out, text_lens, text_padding_mask, ids=sample["example_id"])
         
         extra["wass_loss"] = wass_loss[:B].sum()
-        loss += self.ot_weight * extra["wass_loss"]
+        if self.ot_weight > 0.0:
+            loss += self.ot_weight * extra["wass_loss"]
         
         for i, layer_id in enumerate(self.ot_student_aux_layers):
             extra[f"wass_loss_{layer_id}"] = wass_loss[B*(i+1):B*(i+2)].sum()
