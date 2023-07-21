@@ -170,6 +170,7 @@ class SiameseSpeechTextEncoders(FairseqEncoder):
         self._freeze_text_encoder()  
         self._maybe_freeze_speech_encoder_layers()
         self._maybe_freeze_context_encoder()
+        self._maybe_freeze_speech_embedder()
         
     @classmethod
     def build_speech_encoder(cls, cfg: SpeechEncoderConfig):
@@ -211,6 +212,12 @@ class SiameseSpeechTextEncoders(FairseqEncoder):
         missing_keys, unexpected_keys = spch_encoder.load_state_dict(model_ckpt, strict=False)
         if missing_keys: logger.info(f"Missing keys in state dict (some may correspond to resetted parameters):\n\t" + '\n\t'.join(missing_keys))
         if unexpected_keys: logger.info(f"Unexpected keys in state dict:\n\t" + '\n\t'.join(unexpected_keys))
+        
+        # these were not supposed to be here
+        # so just putting zeros and freezing them
+        if "hubert" in cfg.path:
+            for l in range(7):
+                spch_encoder.w2v_model.feature_extractor.conv_layers[l][0].bias.requires_grad = False
         
         spch_encoder.embed_dim = spch_encoder.w2v_model.cfg.encoder_embed_dim
         spch_encoder.w2v_model.encoder.ctc_layer_id = cfg.ctc_layer_id
@@ -515,6 +522,13 @@ class SiameseSpeechTextEncoders(FairseqEncoder):
             logger.info(f"Not freezing self_attn_layer_norm of first layer ...")
             self.context_encoder.layers[0].self_attn_layer_norm.requires_grad = True
         # no need to deactivate dropout, it;s only gonna used during inference
+        
+    def _maybe_freeze_speech_embedder(self):
+        if _hasattr(self, "speech_embedder") and self.cfg.speech_embedder.freeze:
+            logger.info("Freezing speech embedder ...")
+            for n, p in self.speech_embedder.named_parameters():
+                logger.info(f"- freezing {n}")
+                p.requires_grad = False
 
 @register_model("siamese_encoders_with_ctc", dataclass=SiameseConfig)
 class SiameseEncodersWithCTC(FairseqEncoderDecoderModel):

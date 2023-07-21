@@ -36,6 +36,9 @@ class SpeechEmbedderConfig(FairseqDataclass):
     layer_norm_special: bool = field(
         default=False, metadata={"help": "use layer norm for special embedding"}
     )
+    freeze: bool = field(
+        default=False, metadata={"help": "freeze speech embedder"}
+    )
 
 
 class SpeechEmbedder(nn.Module):
@@ -63,7 +66,6 @@ class SpeechEmbedder(nn.Module):
                 self.scale = 7.0
             else:
                 self.scale = math.sqrt(cfg.embed_dim)
-        # self.scale = math.sqrt(cfg.embed_dim) if cfg.scale_embedding else 1.0
         
     def forward(self, x, padding_mask=None):
         """Add special embedding and positional embedding.

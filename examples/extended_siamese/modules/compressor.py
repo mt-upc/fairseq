@@ -65,6 +65,85 @@ class CompressionTransformer(nn.Module):
         x = x.transpose(0, 1)
 
         return x
+    
+    
+class AdditiveAttention(nn.Module):
+    def __init__(self, embed_dim, hidden_dim, dropout_rate):
+        super(AdditiveAttention, self).__init__()
+
+        # Define the attention layer
+        self.attention = nn.Sequential(
+            nn.Linear(embed_dim * 2, hidden_dim),
+            nn.Tanh(),
+            FairseqDropout(dropout_rate),
+            nn.Linear(hidden_dim, 1)
+        )
+
+        # For the final representation
+        self.representation = nn.Linear(embed_dim, embed_dim)
+        
+    def forward(self, x, mask=None):
+        # x: [B, N, D]
+        # mask: [B, N]
+
+        # Compute a "query" for the attention mechanism
+        query = torch.mean(x, dim=1, keepdim=True) # [B, 1, D]
+
+        # Repeat the query for each element in the sequence
+        query = query.repeat(1, x.size(1), 1) # [B, N, D]
+
+        # Concatenate the query and the input for the attention mechanism
+        attn_input = torch.cat([query, x], dim=-1) # [B, N, 2D]
+
+        # Compute the attention scores
+        attn_scores = self.attention(attn_input) # [B, N, 1]
+        attn_scores = attn_scores.squeeze(-1) # [B, N]
+
+        # If a mask is provided, apply it
+        if mask is not None:
+            attn_scores = attn_scores.masked_fill(mask, float('-inf')) # [B, N]
+
+        # Compute the attention weights
+        attn_weights = F.softmax(attn_scores, dim=-1).unsqueeze(-1) # [B, N, 1]
+
+        # Compute the context vector
+        context = torch.sum(attn_weights * x, dim=1) # [B, D]
+
+        # Pass the context vector through a linear layer for the final representation
+        representation = self.representation(context) # [B, D]
+
+        return representation
+    
+
+class SelfAttention(nn.Module):
+    def __init__(self, embed_dim, hidden_dim, dropout_rate):
+        super(SelfAttention, self).__init__()
+
+        self.attention = nn.Sequential(
+            nn.Linear(embed_dim, hidden_dim),
+            nn.ReLU(),
+            FairseqDropout(dropout_rate),
+            nn.Linear(hidden_dim, 1)
+        )
+
+        self.out = nn.Linear(embed_dim, embed_dim)
+        
+    def forward(self, x, mask=None):
+        # x: [B, N, D]
+        # mask: [B, N]
+
+        attn_scores = self.attention(x).squeeze(-1) # [B, N]
+
+        if mask is not None:
+            attn_scores = attn_scores.masked_fill(mask, float('-inf')) # [B, N]
+
+        attn_weights = F.softmax(attn_scores, dim=-1).unsqueeze(-1) # [B, N, 1]
+
+        context = torch.sum(attn_weights * x, dim=1) # [B, D]
+        
+        representation = self.out(context) # [B, D]
+
+        return representation
 
 
 class LearnedScaledDotProductAttention(nn.Module):
@@ -80,14 +159,14 @@ class LearnedScaledDotProductAttention(nn.Module):
 
     def forward(self, x, padding_mask=None):
         # x: [B, N, D], mask: [B, N]
-
+        
         # Compute query, key and value: apply learned linear transformations
         q = self.query(x)  # [B, N, D]
         k = self.key(x)  # [B, N, D]
         v = self.value(x)  # [B, N, D]
 
         # Compute dot product between query q and key k, and scale it
-        scores = torch.einsum("bnd,bnd->bn", q, k) / self.scale  # [B, N]
+        scores = torch.einsum("bnd,bnd->bn", q, k) / self.scale  # [B, N, N] -> [B, N]
 
         # Apply mask - set the scores to a large negative value where mask is True
         if padding_mask is not None:
@@ -109,6 +188,10 @@ class LevelCompressorConfig(FairseqDataclass):
     pooling_fn: ChoiceEnum(["mean", "max", "attention"]) = field(
         default="mean",
         metadata={"help": "pooling function for collapsing representations"},
+    )
+    attention_type: ChoiceEnum(["additive", "self", "scaled_dot_product"]) = field(
+        default="scaled_dot_product",
+        metadata={"help": "attention type for attention pooling"},
     )
     pre_pooling_processor: ChoiceEnum(["none", "adaptor", "transformer"]) = field(
         default="none",
@@ -171,7 +254,16 @@ class Compressor(nn.Module):
     def _init_modules(self, lvl_cfg):
         attention_pooling = None
         if lvl_cfg.pooling_fn == "attention":
-            attention_pooling = LearnedScaledDotProductAttention(self.embed_dim)
+            
+            if lvl_cfg.attention_type == "additive":
+                attention_pooling = AdditiveAttention(self.embed_dim, 4*self.embed_dim, lvl_cfg.dropout)
+            elif lvl_cfg.attention_type == "self":
+                attention_pooling = SelfAttention(self.embed_dim, 4*self.embed_dim, lvl_cfg.dropout)
+            elif lvl_cfg.attention_type == "scaled_dot_product":
+                attention_pooling = LearnedScaledDotProductAttention(self.embed_dim)
+            else:
+                # FIX later: TODO now defaults to scaled dot product
+                attention_pooling = LearnedScaledDotProductAttention(self.embed_dim)
 
         pre_processor = None
         if lvl_cfg.pre_pooling_processor == "transformer":
