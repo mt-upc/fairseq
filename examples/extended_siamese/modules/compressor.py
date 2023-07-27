@@ -35,10 +35,11 @@ class CompressionAdaptor(nn.Module):
         return x + self.dropout(self.layers(x))
 
 
-class CompressionTransformer(nn.Module):
+class TransformerEncoderLayers(nn.Module):
     def __init__(self, embed_dim, num_layers, dropout_rate):
         super().__init__()
 
+        # TODO: careful bad hardcoding
         cfg = TransformerConfig()
         cfg.encoder.embed_dim = embed_dim
         cfg.encoder.ffn_embed_dim = embed_dim * 4
@@ -65,59 +66,54 @@ class CompressionTransformer(nn.Module):
         x = x.transpose(0, 1)
 
         return x
-    
-    
-class AdditiveAttention(nn.Module):
-    def __init__(self, embed_dim, hidden_dim, dropout_rate):
-        super(AdditiveAttention, self).__init__()
 
-        # Define the attention layer
-        self.attention = nn.Sequential(
-            nn.Linear(embed_dim * 2, hidden_dim),
-            nn.Tanh(),
-            FairseqDropout(dropout_rate),
-            nn.Linear(hidden_dim, 1)
-        )
-
-        # For the final representation
-        self.representation = nn.Linear(embed_dim, embed_dim)
+class BasicPooling(nn.Module):
+    def __init__(self, pooling_fn: str, embed_dim: int):
+        super().__init__()
+        self.out = nn.Linear(embed_dim, embed_dim)
+        self.pooling_fn = pooling_fn
         
-    def forward(self, x, mask=None):
+    def forward(self, x, mask):
         # x: [B, N, D]
         # mask: [B, N]
-
-        # Compute a "query" for the attention mechanism
-        query = torch.mean(x, dim=1, keepdim=True) # [B, 1, D]
-
-        # Repeat the query for each element in the sequence
-        query = query.repeat(1, x.size(1), 1) # [B, N, D]
-
-        # Concatenate the query and the input for the attention mechanism
-        attn_input = torch.cat([query, x], dim=-1) # [B, N, 2D]
-
-        # Compute the attention scores
-        attn_scores = self.attention(attn_input) # [B, N, 1]
-        attn_scores = attn_scores.squeeze(-1) # [B, N]
-
-        # If a mask is provided, apply it
-        if mask is not None:
-            attn_scores = attn_scores.masked_fill(mask, float('-inf')) # [B, N]
-
-        # Compute the attention weights
-        attn_weights = F.softmax(attn_scores, dim=-1).unsqueeze(-1) # [B, N, 1]
-
-        # Compute the context vector
-        context = torch.sum(attn_weights * x, dim=1) # [B, D]
-
-        # Pass the context vector through a linear layer for the final representation
-        representation = self.representation(context) # [B, D]
-
-        return representation
+        
+        if self.pooling_fn == "mean":
+            lens = (~mask).to(torch.long).sum(dim=1).to(x.dtype) # [B]
+            lens[lens.eq(0.0)] = 1.5  # to avoid division by 0
+            y = torch.sum(x, dim=1) / lens.unsqueeze(1) # [B, D]
+        elif self.pooling_fn == "max":
+            y = torch.max(x, dim=1)[0] # [B, D]
+            
+        y = self.out(y) # [B, D]
+            
+        return y
     
-
-class SelfAttention(nn.Module):
+class CLSPooling(nn.Module):
+    def __init__(self, embed_dim, num_transformer_layers=1, dropout_rate=0.0):
+        super().__init__()
+        self.cls_token = torch.empty(1, 1, embed_dim)
+        nn.init.xavier_uniform_(self.cls_token)
+        
+        self.transformer = TransformerEncoderLayers(embed_dim, num_transformer_layers, dropout_rate)
+        
+    def forward(self, x, mask):
+        # x: [B, N, D]
+        # mask: [B, N]
+        
+        cls_token = self.cls_token.repeat(x.size(0), 1, 1).to(dtype=x.dtype, device=x.device) # [B, 1, D]
+        cls_mask = torch.zeros(x.size(0), 1, dtype=mask.dtype, device=mask.device) # [B, 1]
+        x = torch.cat([cls_token, x], dim=1) # [B, N+1, D]
+        mask = torch.cat([cls_mask, mask], dim=1) # [B, N+1]
+        
+        x = self.transformer(x, mask) # [B, N+1, D]
+        
+        y = x[:, 0] # [B, D]
+        
+        return y
+    
+class AttentionPooling(nn.Module):
     def __init__(self, embed_dim, hidden_dim, dropout_rate):
-        super(SelfAttention, self).__init__()
+        super().__init__()
 
         self.attention = nn.Sequential(
             nn.Linear(embed_dim, hidden_dim),
@@ -128,87 +124,41 @@ class SelfAttention(nn.Module):
 
         self.out = nn.Linear(embed_dim, embed_dim)
         
-    def forward(self, x, mask=None):
+    def forward(self, x, mask):
         # x: [B, N, D]
         # mask: [B, N]
 
         attn_scores = self.attention(x).squeeze(-1) # [B, N]
-
-        if mask is not None:
-            attn_scores = attn_scores.masked_fill(mask, float('-inf')) # [B, N]
+        attn_scores = attn_scores.masked_fill(mask, float('-inf')) # [B, N]
 
         attn_weights = F.softmax(attn_scores, dim=-1).unsqueeze(-1) # [B, N, 1]
 
-        context = torch.sum(attn_weights * x, dim=1) # [B, D]
-        
-        representation = self.out(context) # [B, D]
-
-        return representation
-
-
-class LearnedScaledDotProductAttention(nn.Module):
-    def __init__(self, embed_dim):
-        super(LearnedScaledDotProductAttention, self).__init__()
-
-        self.query = nn.Linear(embed_dim, embed_dim)
-        self.key = nn.Linear(embed_dim, embed_dim)
-        self.value = nn.Linear(embed_dim, embed_dim)
-        self.out = nn.Linear(embed_dim, embed_dim)
-
-        self.scale = embed_dim**0.5
-
-    def forward(self, x, padding_mask=None):
-        # x: [B, N, D], mask: [B, N]
-        
-        # Compute query, key and value: apply learned linear transformations
-        q = self.query(x)  # [B, N, D]
-        k = self.key(x)  # [B, N, D]
-        v = self.value(x)  # [B, N, D]
-
-        # Compute dot product between query q and key k, and scale it
-        scores = torch.einsum("bnd,bnd->bn", q, k) / self.scale  # [B, N, N] -> [B, N]
-
-        # Apply mask - set the scores to a large negative value where mask is True
-        if padding_mask is not None:
-            scores.masked_fill_(padding_mask, float("-inf"))
-
-        # Apply softmax to get the attention weights
-        attn_weights = F.softmax(scores, dim=-1)  # [B, N]
-
-        # Compute the weighted sum of values along the sequence dimension
-        y = torch.einsum("bn,bnd->bd", attn_weights, v)  # [B, D]
-
-        y = self.out(y)
+        y = torch.sum(attn_weights * x, dim=1) # [B, D]
+        y = self.out(y) # [B, D]
 
         return y
 
 
 @dataclass
 class LevelCompressorConfig(FairseqDataclass):
-    pooling_fn: ChoiceEnum(["mean", "max", "attention"]) = field(
+    pooling_fn: ChoiceEnum(["mean", "max", "attention", "cls"]) = field(
         default="mean",
         metadata={"help": "pooling function for collapsing representations"},
     )
-    attention_type: ChoiceEnum(["additive", "self", "scaled_dot_product"]) = field(
-        default="scaled_dot_product",
-        metadata={"help": "attention type for attention pooling"},
+    attn_hidden_dim: int = field(
+        default=4096,
+        metadata={"help": "hidden dimension for attention pooling"}
     )
-    pre_pooling_processor: ChoiceEnum(["none", "adaptor", "transformer"]) = field(
-        default="none",
-        metadata={"help": "pooling processor for this level compression"},
+    cls_transformer_layers: int = field(
+        default=1,
+        metadata={"help": "number of transformer layers if pooling_fn is cls"},
     )
     post_pooling_adaptor: bool = field(
         default=False, metadata={"help": "whether to use an adaptor after pooling"}
     )
-    transformer_layers: int = field(
-        default=1,
-        metadata={
-            "help": "number of transformer layers if pooling_processor is transformer"
-        },
-    )
     adaptor_dim: int = field(
-        default=8192,
-        metadata={"help": "projection dimension if pooling_processor is adaptor"},
+        default=4096,
+        metadata={"help": "projection dimension for post-pooling adaptor"},
     )
     dropout: float = field(
         default=0.0,
@@ -238,87 +188,28 @@ class Compressor(nn.Module):
         self.sep_idx = sep_idx
 
         assert cfg.char_compression is not None
-        (
-            self.char_attention_pooling,
-            self.char_pre_processor,
-            self.char_post_processor,
-        ) = self._init_modules(cfg.char_compression)
+        self.char_pooling_module, self.char_post_adaptor = self._init_modules(cfg.char_compression)
 
         if cfg.token_compression is not None:
-            (
-                self.token_attention_pooling,
-                self.token_pre_processor,
-                self.token_post_processor,
-            ) = self._init_modules(cfg.token_compression)
+            self.token_pooling_module, self.token_post_adaptor = self._init_modules(cfg.token_compression)
 
     def _init_modules(self, lvl_cfg):
-        attention_pooling = None
+
         if lvl_cfg.pooling_fn == "attention":
-            
-            if lvl_cfg.attention_type == "additive":
-                attention_pooling = AdditiveAttention(self.embed_dim, 4*self.embed_dim, lvl_cfg.dropout)
-            elif lvl_cfg.attention_type == "self":
-                attention_pooling = SelfAttention(self.embed_dim, 4*self.embed_dim, lvl_cfg.dropout)
-            elif lvl_cfg.attention_type == "scaled_dot_product":
-                attention_pooling = LearnedScaledDotProductAttention(self.embed_dim)
-            else:
-                # FIX later: TODO now defaults to scaled dot product
-                attention_pooling = LearnedScaledDotProductAttention(self.embed_dim)
+            pooling_module = AttentionPooling(self.embed_dim, lvl_cfg.attn_hidden_dim, lvl_cfg.dropout)    
+        elif lvl_cfg.pooling_fn == "cls":
+            pooling_module = CLSPooling(self.embed_dim, lvl_cfg.cls_transformer_layers, lvl_cfg.dropout) 
+        else: # mean or max
+            pooling_module = BasicPooling(lvl_cfg.pooling_fn, self.embed_dim)
 
-        pre_processor = None
-        if lvl_cfg.pre_pooling_processor == "transformer":
-            pre_processor = CompressionTransformer(
-                self.embed_dim, lvl_cfg.transformer_layers, lvl_cfg.dropout
-            )
-        elif lvl_cfg.pre_pooling_processor == "adaptor":
-            pre_processor = CompressionAdaptor(
-                self.embed_dim, lvl_cfg.adaptor_dim, lvl_cfg.dropout
-            )
-
-        post_processor = None
+        post_adaptor = None
         if lvl_cfg.post_pooling_adaptor:
-            post_processor = CompressionAdaptor(
+            post_adaptor = CompressionAdaptor(
                 self.embed_dim, lvl_cfg.adaptor_dim, lvl_cfg.dropout
             )
 
-        return attention_pooling, pre_processor, post_processor
+        return pooling_module, post_adaptor
 
-    def pool(self, x, lens=None, lvl="char"):
-        if lvl == "char":
-            fn = self.cfg.char_compression.pooling_fn
-        else:
-            fn = self.cfg.token_compression.pooling_fn
-
-        if fn == "mean":
-            lens_ = lens.to(x.dtype)
-            lens_[lens_ == 0.0] = 1.5  # to avoid division by 0
-            y = torch.sum(x, dim=1) / lens_.unsqueeze(1)
-
-        elif fn == "max":
-            y = torch.max(x, dim=1)[0]
-
-        elif fn == "attention":
-            mask = lengths_to_padding_mask(lens)
-            if lvl == "char":
-                y = self.char_attention_pooling(x, mask)
-            else:
-                y = self.token_attention_pooling(x, mask)
-
-        return y
-
-    def pre_process(self, x, padding_mask, valid_examples, processor):
-        if processor is None:
-            return x
-
-        if isinstance(processor, CompressionTransformer):
-            x[valid_examples] = processor(
-                x[valid_examples], padding_mask[valid_examples]
-            )
-        elif isinstance(processor, CompressionAdaptor):
-            x[valid_examples] = processor(x[valid_examples])
-
-        return x
-    
     def char_compression(self, x, preds):
         # x: B x T x D
         # preds: B x T
@@ -359,17 +250,11 @@ class Compressor(nn.Module):
         x_chars = x_chars.view(B * n, m, D)
         counts = counts.view(B * n)
         valid_chars = valid_chars.view(B * n)
-        char_padding_mask = lengths_to_padding_mask(counts)
-
-        x_chars = self.pre_process(
-            x_chars, char_padding_mask, valid_chars, self.char_pre_processor
-        )
         
         x_compr = torch.zeros(B * n, D, device=x.device, dtype=x.dtype)
-        x_compr[valid_chars] = self.pool(
+        x_compr[valid_chars] = self.char_pooling_module(
             x_chars[valid_chars],
-            lens=counts[valid_chars],
-            lvl="char"
+            lengths_to_padding_mask(counts[valid_chars])
         )  # B * n x D
 
         x_compr = x_compr.view(B, n, D)  # B x n x D
@@ -398,8 +283,8 @@ class Compressor(nn.Module):
 
         mask = lengths_to_padding_mask(compr_valid_lens)  # B x N
 
-        if self.char_post_processor is not None:
-            x_compr = self.char_post_processor(x_compr)
+        if self.char_post_adaptor is not None:
+            x_compr = self.char_post_adaptor(x_compr)
 
         return x_compr, mask, compr_valid_lens, compr_preds
     
@@ -466,26 +351,21 @@ class Compressor(nn.Module):
         token_padding_mask = lengths_to_padding_mask(token_lengths)
         valid_tokens = token_padding_mask.eq(0).any(dim=-1)
 
-        x_tokens = self.pre_process(
-            x_tokens, token_padding_mask, valid_tokens, self.token_pre_processor
-        )
-
         x_compr = torch.zeros(B * n, D, device=x.device, dtype=x.dtype)
-        x_compr[valid_tokens] = self.pool(
+        x_compr[valid_tokens] = self.token_pooling_module(
             x_tokens[valid_tokens],
-            lens=token_lengths[valid_tokens],
-            lvl="token"
+            lengths_to_padding_mask(token_lengths[valid_tokens])
         )  # B * n x D
-
+        
         x_compr = x_compr.view(B, n, D)  # B x num_words x D
         x_compr_lens = (token_lengths.view(B, -1) != 0).sum(dim=-1)  # B
         x_compr_mask = lengths_to_padding_mask(x_compr_lens)  # B x num_words
         x_compr.masked_fill_(x_compr_mask.unsqueeze(-1), 0)
 
-        if self.token_post_processor is not None:
-            x_compr = self.token_post_processor(x_compr)
+        if self.token_post_adaptor is not None:
+            x_compr = self.token_post_adaptor(x_compr)
             
         return x_compr, x_compr_mask, x_compr_lens
             
-    def forward(self, x):
+    def forward(self, **kwargs):
         raise NotImplementedError("Use the compression method instead")
