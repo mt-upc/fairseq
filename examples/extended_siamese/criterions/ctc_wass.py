@@ -166,32 +166,33 @@ class CtcWassersteinCriterion(CtcCriterion):
             if self.ctc_sep_weight > 0.0:
                 loss += self.ctc_sep_weight * extra["ctc_sep_loss"]
 
-        speech_out, speech_lens, speech_padding_mask = self._get_speech_repr(encoder_out)
-        text_out, text_lens, text_padding_mask = self._get_text_repr(net_input, encoder_out)
+        if self.ot_weight > 0.0 or self.ot_student_aux_layers:
+            speech_out, speech_lens, speech_padding_mask = self._get_speech_repr(encoder_out)
+            text_out, text_lens, text_padding_mask = self._get_text_repr(net_input, encoder_out)
 
-        m = len(self.ot_aux_weights) + 1
-        B = speech_out.size(1)
-        
-        speech_out = torch.cat([speech_out, *[encoder_out[0]["context_ln_results"][layer_id] for layer_id in self.ot_student_aux_layers]], dim=1)
-        speech_lens = speech_lens.repeat(m)
-        speech_padding_mask = speech_padding_mask.repeat(m, 1)
-        
-        if "src_txt_enc" in net_input:
-            text_out = torch.cat([text_out, *[net_input["src_txt_ln_results"][layer_id].transpose(0, 1) for layer_id in self.ot_teacher_aux_layers]], dim=1)
-        else:   
-            text_out = torch.cat([text_out, *[encoder_out[1]["ln_results"][layer_id] for layer_id in self.ot_teacher_aux_layers]], dim=1)
-        text_lens = text_lens.repeat(m)
-        text_padding_mask = text_padding_mask.repeat(m, 1)
-        
-        wass_loss = self.compute_wass_loss(speech_out, speech_lens, speech_padding_mask, text_out, text_lens, text_padding_mask, ids=sample["example_id"])
-        
-        extra["wass_loss"] = wass_loss[:B].sum()
-        if self.ot_weight > 0.0:
-            loss += self.ot_weight * extra["wass_loss"]
-        
-        for i, layer_id in enumerate(self.ot_student_aux_layers):
-            extra[f"wass_loss_{layer_id}"] = wass_loss[B*(i+1):B*(i+2)].sum()
-            loss += self.ot_aux_weights[i] * extra[f"wass_loss_{layer_id}"]
+            m = len(self.ot_aux_weights) + 1
+            B = speech_out.size(1)
+            
+            speech_out = torch.cat([speech_out, *[encoder_out[0]["context_ln_results"][layer_id] for layer_id in self.ot_student_aux_layers]], dim=1)
+            speech_lens = speech_lens.repeat(m)
+            speech_padding_mask = speech_padding_mask.repeat(m, 1)
+            
+            if "src_txt_enc" in net_input:
+                text_out = torch.cat([text_out, *[net_input["src_txt_ln_results"][layer_id].transpose(0, 1) for layer_id in self.ot_teacher_aux_layers]], dim=1)
+            else:   
+                text_out = torch.cat([text_out, *[encoder_out[1]["ln_results"][layer_id] for layer_id in self.ot_teacher_aux_layers]], dim=1)
+            text_lens = text_lens.repeat(m)
+            text_padding_mask = text_padding_mask.repeat(m, 1)
+            
+            wass_loss = self.compute_wass_loss(speech_out, speech_lens, speech_padding_mask, text_out, text_lens, text_padding_mask, ids=sample["example_id"])
+            
+            extra["wass_loss"] = wass_loss[:B].sum()
+            if self.ot_weight > 0.0:
+                loss += self.ot_weight * extra["wass_loss"]
+            
+            for i, layer_id in enumerate(self.ot_student_aux_layers):
+                extra[f"wass_loss_{layer_id}"] = wass_loss[B*(i+1):B*(i+2)].sum()
+                loss += self.ot_aux_weights[i] * extra[f"wass_loss_{layer_id}"]
     
         logging_output = {
             "loss": utils.item(loss.data)
@@ -213,7 +214,7 @@ class CtcWassersteinCriterion(CtcCriterion):
             else sample["ntokens"],
         }
         
-        for i, layer_id in enumerate(self.ot_student_aux_layers):
+        for _, layer_id in enumerate(self.ot_student_aux_layers):
             logging_output[f"wass_loss_{layer_id}"] = utils.item(extra[f"wass_loss_{layer_id}"].data) if extra[f"wass_loss_{layer_id}"] != 0.0 else 0.0
         
         if net_output is not None:
@@ -229,10 +230,11 @@ class CtcWassersteinCriterion(CtcCriterion):
                 logging_output["token_compression_rate"] = utils.item(
                     encoder_out[0]["token_compression_rate"].data.sum()
                 )
-                
-        logging_output["speech_text_len_ratio"] = utils.item(
-            (speech_lens[:B].float() / text_lens[:B].float()).data.sum()
-        )
+        
+        if self.ot_weight > 0.0 or self.ot_student_aux_layers:
+            logging_output["speech_text_len_ratio"] = utils.item(
+                (speech_lens[:B].float() / text_lens[:B].float()).data.sum()
+            )
 
         if "num_predicted_sep" in extra:
             logging_output["num_predicted_sep"] = extra["num_predicted_sep"]
