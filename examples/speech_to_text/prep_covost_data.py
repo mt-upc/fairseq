@@ -240,13 +240,17 @@ def process(args):
     root = Path(args.data_root).absolute() / args.src_lang
     if not root.is_dir():
         raise NotADirectoryError(f"{root} does not exist")
-    splits = ["train", "dev", "test"] if not args.no_train else ["dev", "test"]
+    splits = CoVoST.SPLITS
     task = f"asr_{args.src_lang}"
     if args.tgt_lang is not None:
         task = f"st_{args.src_lang}_{args.tgt_lang}"
     # Extract features
     dir_name = "flac" if args.use_audio_input else "fbank80"
-    dir_name += f"_{'-'.join(splits)}_{task}"
+    if args.src_lang == "en":
+        # same for all en-Xx pairs
+        dir_name += "_st_en_xx"
+    else:
+        dir_name += f"_{task}"
     audio_root = root / dir_name
     zip_path = root / f"{audio_root.name}.zip"
     if not zip_path.is_file():
@@ -308,7 +312,7 @@ def process(args):
                 )
             )
         is_train_split = split.startswith("train")
-        if is_train_split:
+        if is_train_split and not args.no_vocab:
             train_text.extend(manifest["tgt_text"])
         df = pd.DataFrame.from_dict(manifest)
         df = filter_manifest_df(
@@ -319,7 +323,7 @@ def process(args):
         )
         save_df_to_tsv(df, root / f"{split}_{task}.tsv")
     # Generate vocab
-    if not args.no_train:
+    if not args.no_vocab:
         vocab_size_str = "" if args.vocab_type == "char" else str(args.vocab_size)
         spm_filename_prefix = f"spm_{args.vocab_type}{vocab_size_str}_{task}"
         with NamedTemporaryFile(mode="w") as f:
@@ -339,7 +343,10 @@ def process(args):
             specaugment_policy="lb",
         )
     # Clean up
-    shutil.rmtree(audio_root)
+    try:
+        shutil.rmtree(audio_root)
+    except:
+        pass
 
 
 def main():
@@ -358,7 +365,7 @@ def main():
     parser.add_argument("--src-lang", "-s", required=True, type=str)
     parser.add_argument("--tgt-lang", "-t", type=str)
     parser.add_argument("--use-audio-input", action="store_true")
-    parser.add_argument("--no-train", action="store_true")
+    parser.add_argument("--no-vocab", action="store_true")
     args = parser.parse_args()
 
     process(args)
