@@ -175,7 +175,10 @@ class SiameseSpeechTextEncoders(FairseqEncoder):
     @classmethod
     def build_speech_encoder(cls, cfg: SpeechEncoderConfig):
     
-        ckpt = torch.load(cfg.path)
+        try:
+            ckpt = torch.load(cfg.path)
+        except:
+            ckpt = torch.load('/home/usuaris/scratch/ioannis.tsiamas/pretrained_models/wav2vec2/wav2vec_vox_960h_pl.pt')
         
         if "args" in ckpt and ckpt["args"] is not None:
             w2v_model_config = convert_namespace_to_omegaconf(ckpt["args"]).model
@@ -226,7 +229,11 @@ class SiameseSpeechTextEncoders(FairseqEncoder):
 
     @classmethod
     def build_text_encoder(cls, cfg: TextEncoderConfig, src_dictionary):
-        ckpt = torch.load(cfg.path)
+        
+        try:
+            ckpt = torch.load(cfg.path)
+        except:
+            ckpt = torch.load('/home/usuaris/scratch/ioannis.tsiamas/pretrained_models/nllb/nllb-200-distilled-600M.pt')
         
         if ckpt["args"] is None:
             model_args = ckpt["cfg"]["model"]
