@@ -21,6 +21,7 @@ from omegaconf import II, MISSING, open_dict
 from fairseq import checkpoint_utils, tasks, utils
 from fairseq.dataclass import FairseqDataclass
 from fairseq.dataclass.utils import convert_namespace_to_omegaconf
+from fairseq.data.data_utils import lengths_to_padding_mask
 from fairseq.models import (
     BaseFairseqModel,
     FairseqEncoder,
@@ -335,7 +336,9 @@ class Wav2Vec2Seq2SeqModel(FairseqEncoderDecoderModel):
         return TransformerDecoder(cfg, tgt_dict, embed_tokens)
 
     def forward(self, **kwargs):
-        encoder_out = self.encoder(**kwargs)
+        source = kwargs["src_tokens"]
+        padding_mask = lengths_to_padding_mask(kwargs["src_lengths"])
+        encoder_out = self.encoder(source, padding_mask)
         decoder_out = self.decoder(encoder_out=encoder_out, **kwargs)
         return decoder_out
 
@@ -589,6 +592,8 @@ class TransformerDecoder(FairseqIncrementalDecoder):
             transformer_cfg.activation_dropout = (
                 transformer_cfg.decoder_activation_dropout
             )
+            transformer_cfg.encoder_embed_dim = embed_dim
+            transformer_cfg.w2v_args.model.final_dim = embed_dim
 
         self.layers = nn.ModuleList([])
         self.layers.extend(
