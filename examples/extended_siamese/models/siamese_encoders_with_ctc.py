@@ -428,10 +428,6 @@ class SiameseSpeechTextEncoders(FairseqEncoder):
         else:
             padding_mask = None
 
-        if self.cfg.context_encoder.freeze:
-            if self.context_encoder.training:
-                self.context_encoder.eval()
-
         x = self.context_encoder(x, padding_mask)
             
         if isinstance(x, tuple):
@@ -524,11 +520,11 @@ class SiameseSpeechTextEncoders(FairseqEncoder):
         if _hasattr(self, "context_encoder") and self.cfg.context_encoder.freeze:
             logger.info(f"Freezing context encoder ...")
             for n, p in self.context_encoder.named_parameters():
+                if "layers.0.self_attn_layer_norm" in n:
+                    logger.info(f"- Not freezing {n}")
+                    continue
                 logger.info(f"- freezing {n}")
                 p.requires_grad = False
-            logger.info(f"Not freezing self_attn_layer_norm of first layer ...")
-            self.context_encoder.layers[0].self_attn_layer_norm.requires_grad = True
-        # no need to deactivate dropout, it;s only gonna used during inference
         
     def _maybe_freeze_speech_embedder(self):
         if _hasattr(self, "speech_embedder") and self.cfg.speech_embedder.freeze:
