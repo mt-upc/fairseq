@@ -138,6 +138,9 @@ class CtcWassersteinCriterion(CtcCriterion):
         self.ot_loss = SamplesLoss(
             loss=cfg.ot_loss, p=self.ot_p, blur=self.ot_blur, scaling=self.ot_scaling
         )
+        
+        self.calculate_ctc = self.ctc_weight > 0.0 or self.ctc_sep_weight > 0.0
+        self.calculate_ot = self.ot_weight > 0.0 or sum(self.ot_aux_weights) > 0.0
 
     def forward(self, model, sample):
         net_input = sample["net_input"]
@@ -156,7 +159,7 @@ class CtcWassersteinCriterion(CtcCriterion):
         for layer_id in self.ot_student_aux_layers:
             extra[f"wass_loss_{layer_id}"] = 0.0
 
-        if self.ctc_weight > 0.0 or self.ctc_sep_weight > 0.0:
+        if self.calculate_ctc:
             ctc_loss, extra = self.compute_ctc_loss(
                 model, net_output, encoder_out, sample["target"], extra
             )
@@ -166,7 +169,7 @@ class CtcWassersteinCriterion(CtcCriterion):
             if self.ctc_sep_weight > 0.0:
                 loss += self.ctc_sep_weight * extra["ctc_sep_loss"]
 
-        if self.ot_weight > 0.0 or self.ot_student_aux_layers:
+        if self.calculate_ot:
             speech_out, speech_lens, speech_padding_mask = self._get_speech_repr(encoder_out)
             text_out, text_lens, text_padding_mask = self._get_text_repr(net_input, encoder_out)
 
@@ -231,7 +234,7 @@ class CtcWassersteinCriterion(CtcCriterion):
                     encoder_out[0]["token_compression_rate"].data.sum()
                 )
         
-        if self.ot_weight > 0.0 or self.ot_student_aux_layers:
+        if self.calculate_ot:
             logging_output["speech_text_len_ratio"] = utils.item(
                 (speech_lens[:B].float() / text_lens[:B].float()).data.sum()
             )
