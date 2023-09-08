@@ -29,9 +29,20 @@ class SiameseSpeechTextTask(SpeechTextJointToTextTask):
         self.tgt_dict = tgt_dict
         self.data_cfg = S2TJointDataConfig(Path(cfg.data) / cfg.config_yaml)
         self.cfg = cfg
-        self.ot_aux_layers = []
+        
+        # gather here some other task parameters from other configs to pass it to the dataset constructor
+        self.data_cfg.config["ot_aux_layers"] = []
         if hasattr(self.cfg, "ot_aux_layers") and self.cfg.ot_aux_layers:
-            self.ot_aux_layers = [int(l) for l in self.cfg.ot_aux_layers.split(",")]
+            self.data_cfg.config["ot_aux_layers"] = [int(l) for l in self.cfg.ot_aux_layers.split(",")]
+        if hasattr(self.cfg, "mt_model_path") and self.cfg.mt_model_path:
+            if "ckpts" in self.cfg.mt_model_path:
+                # fine-tuned version
+                self.data_cfg.config["mt_model_name"] = Path(self.cfg.mt_model_path).parent.parent.name
+            else:
+                # original version
+                self.data_cfg.config["mt_model_name"] = Path(self.cfg.mt_model_path).stem
+        if hasattr(self.cfg, "mt_num_layers") and self.cfg.mt_num_layers:
+            self.data_cfg.config["mt_num_layers"]  = self.cfg.mt_num_layers
 
     @classmethod
     def setup_task(cls, cfg, **kwcfg):
@@ -87,7 +98,6 @@ class SiameseSpeechTextTask(SpeechTextJointToTextTask):
             append_eos=True,
             use_src_lang_id=self.data_cfg.prepend_src_lang_tag,
         )
-        s2t_dataset.aux_layers = self.ot_aux_layers
         self.datasets[split] = s2t_dataset
 
     @property

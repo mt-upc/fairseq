@@ -66,9 +66,18 @@ class S2TJointDataConfig(S2TDataConfig):
     def prepend_src_lang_tag(self):
         return self.config.get("prepend_src_lang_tag", False)
     
+    # the following will be defined from the task cfg and passed to the datacfg
     @property
     def mt_model_name(self):
         return self.config.get("mt_model_name", None)
+    
+    @property
+    def mt_num_layers(self):
+        return self.config.get("mt_num_layers", None)
+    
+    @property
+    def ot_aux_layers(self):
+        return self.config.get("ot_aux_layers", None)
 
 
 class SpeechToTextJointDatasetItem(NamedTuple):
@@ -144,14 +153,9 @@ class SpeechToTextJointDataset(SpeechToTextDataset):
             self.alignment = [
                 [float(s) for s in sample.split()] for sample in alignment
             ]
-            
-        self.aux_layers = []
-        if hasattr(cfg, "mt_model_name") and cfg.mt_model_name is not None:
-            self.mt_model_name = cfg.mt_model_name
-            if "600M" in self.mt_model_name:
-                self.n_layers = 12
-            else:
-                self.n_layers = 24
+        self.aux_layers = cfg.ot_aux_layers
+        self.num_layers = cfg.mt_num_layers
+        self.model_name = cfg.mt_model_name
 
     def get_tokenized_src_text(self, index: int):
         text = self.tokenize(self.src_pre_tokenizer, self.src_texts[index])
@@ -180,7 +184,7 @@ class SpeechToTextJointDataset(SpeechToTextDataset):
             ali = torch.Tensor(self.alignment[index]).float()
             
         src_txt_enc = None
-        src_txt_aux = [None for _ in range(self.n_layers)]
+        src_txt_aux = [None for _ in range(self.num_layers)]
         if self.src_text_reprs is not None:
             repr = torch.load(self.src_text_reprs[index], map_location=torch.device("cpu"))
             src_txt_enc = repr["encoder_out"]
@@ -211,7 +215,7 @@ class SpeechToTextJointDataset(SpeechToTextDataset):
         enc = [x.src_txt_enc for x in samples]       
         enc_collated = _collater(enc)
         
-        aux_collated = [None for _ in range(self.n_layers)]
+        aux_collated = [None for _ in range(self.num_layers)]
         for l_id in self.aux_layers:
             aux_collated[l_id] = _collater([x.src_txt_aux[l_id] for x in samples])
             

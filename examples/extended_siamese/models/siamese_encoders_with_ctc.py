@@ -122,6 +122,10 @@ class TextEncoderConfig(FairseqDataclass):
         metadata={"help": "do not use text encoder."
                   "Remove it after loading the model to construct the speech embedder and context encoder"}
         )
+    num_layers: int = field(
+        default=12,
+        metadata={"help": "number of encoder layers in the MT model"}
+    )
 
 @dataclass
 class SiameseConfig(FairseqDataclass):
