@@ -104,15 +104,17 @@ class SpeechTextJointToTextTaskConfig(SpeechToTextTaskConfig):
         default=II("criterion.ot_teacher_aux_layers"),
         metadata={"help": "auxiliary layers for OT loss"},
     )
-    mt_model_path: str = field(
-        default=II("model.text_encoder.path"),
-        metadata={"help": "path to the mt model"
-                  "useful to get the name of the model and pass it to the dataset"
-                  "in order to load the cached representations from that encoder"}
-    )
     mt_num_layers: int = field(
         default=II("model.text_encoder.num_layers"),
         metadata={"help": "number of layers in the MT encoder"}
+    )
+    tgt_text_name: str = field(
+        default="tgt_text",
+        metadata={"help": "name of the text field in the tsv"}
+    )
+    cached_text_representations_path: str = field(
+        default="",
+        metadata={"help": "path to cached text representations"}
     )
 
 

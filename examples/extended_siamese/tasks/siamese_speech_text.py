@@ -34,15 +34,12 @@ class SiameseSpeechTextTask(SpeechTextJointToTextTask):
         self.data_cfg.config["ot_aux_layers"] = []
         if hasattr(self.cfg, "ot_aux_layers") and self.cfg.ot_aux_layers:
             self.data_cfg.config["ot_aux_layers"] = [int(l) for l in self.cfg.ot_aux_layers.split(",")]
-        if hasattr(self.cfg, "mt_model_path") and self.cfg.mt_model_path:
-            if "ckpts" in self.cfg.mt_model_path:
-                # fine-tuned version
-                self.data_cfg.config["mt_model_name"] = Path(self.cfg.mt_model_path).parent.parent.name
-            else:
-                # original version
-                self.data_cfg.config["mt_model_name"] = Path(self.cfg.mt_model_path).stem
         if hasattr(self.cfg, "mt_num_layers") and self.cfg.mt_num_layers:
             self.data_cfg.config["mt_num_layers"]  = self.cfg.mt_num_layers
+        if hasattr(self.cfg, "cached_text_representations_path") and self.cfg.cached_text_representations_path:
+            self.data_cfg.config["cached_text_representations_path"] = Path(self.cfg.cached_text_representations_path)
+        if hasattr(self.cfg, "tgt_text_name",) and self.cfg.tgt_text_name:
+            self.data_cfg.config["tgt_text_name"] = self.cfg.tgt_text_name
 
     @classmethod
     def setup_task(cls, cfg, **kwcfg):

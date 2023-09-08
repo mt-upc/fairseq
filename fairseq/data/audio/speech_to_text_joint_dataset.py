@@ -66,11 +66,7 @@ class S2TJointDataConfig(S2TDataConfig):
     def prepend_src_lang_tag(self):
         return self.config.get("prepend_src_lang_tag", False)
     
-    # the following will be defined from the task cfg and passed to the datacfg
-    @property
-    def mt_model_name(self):
-        return self.config.get("mt_model_name", None)
-    
+    # the following will be defined from the task cfg and passed to the datacfg  
     @property
     def mt_num_layers(self):
         return self.config.get("mt_num_layers", None)
@@ -78,6 +74,14 @@ class S2TJointDataConfig(S2TDataConfig):
     @property
     def ot_aux_layers(self):
         return self.config.get("ot_aux_layers", None)
+    
+    @property
+    def cached_text_representations_path(self):
+        return self.config.get("cached_text_representations_path", None)
+    
+    @property
+    def tgt_text_name(self):
+        return self.config.get("tgt_text_name", "tgt_text")
 
 
 class SpeechToTextJointDatasetItem(NamedTuple):
@@ -111,7 +115,6 @@ class SpeechToTextJointDataset(SpeechToTextDataset):
         src_langs: Optional[List[str]] = None,
         tgt_langs: Optional[List[str]] = None,
         ids: Optional[List[str]] = None,
-        src_text_reprs: Optional[List[str]] = None,
         tgt_dict: Optional[Dictionary] = None,
         src_dict: Optional[Dictionary] = None,
         pre_tokenizer=None,
@@ -134,7 +137,6 @@ class SpeechToTextJointDataset(SpeechToTextDataset):
             src_langs=src_langs,
             tgt_langs=tgt_langs,
             ids=ids,
-            src_text_reprs=src_text_reprs,
             tgt_dict=tgt_dict,
             pre_tokenizer=pre_tokenizer,
             bpe_tokenizer=bpe_tokenizer,
@@ -145,9 +147,7 @@ class SpeechToTextJointDataset(SpeechToTextDataset):
         self.src_pre_tokenizer = src_pre_tokenizer
         self.src_bpe_tokenizer = src_bpe_tokenizer
         self.alignment = None
-        if all(x == "" for x in self.src_text_reprs):
-            self.src_text_reprs = None
-        self.load_src_text = src_texts is not None and src_dict is not None and self.src_text_reprs is None
+        self.load_src_text = src_texts is not None and src_dict is not None and cfg.cached_text_representations_path is None
         self.use_src_lang_id = use_src_lang_id
         if alignment is not None:
             self.alignment = [
@@ -155,7 +155,7 @@ class SpeechToTextJointDataset(SpeechToTextDataset):
             ]
         self.aux_layers = cfg.ot_aux_layers
         self.num_layers = cfg.mt_num_layers
-        self.model_name = cfg.mt_model_name
+        self.cached_text_representations_path = cfg.cached_text_representations_path
 
     def get_tokenized_src_text(self, index: int):
         text = self.tokenize(self.src_pre_tokenizer, self.src_texts[index])
@@ -185,8 +185,11 @@ class SpeechToTextJointDataset(SpeechToTextDataset):
             
         src_txt_enc = None
         src_txt_aux = [None for _ in range(self.num_layers)]
-        if self.src_text_reprs is not None:
-            repr = torch.load(self.src_text_reprs[index], map_location=torch.device("cpu"))
+        if self.cfg.cached_text_representations_path is not None:
+            repr = torch.load(
+                self.cached_text_representations_path / f"{self.ids[index]}.pt",
+                map_location=torch.device("cpu")
+            )
             src_txt_enc = repr["encoder_out"]
             for l_id in self.aux_layers:
                 src_txt_aux[l_id] = repr[f"ln_results{l_id}"]
@@ -316,9 +319,8 @@ class SpeechToTextJointDatasetCreator(SpeechToTextDatasetCreator):
         ids = [s[cls.KEY_ID] for s in samples]
         audio_paths = [(audio_root / s[cls.KEY_AUDIO]).as_posix() for s in samples]
         n_frames = [int(s[cls.KEY_N_FRAMES]) for s in samples]
-        tgt_texts = [s[cls.KEY_TGT_TEXT] for s in samples]
+        tgt_texts = [s[cfg.tgt_text_name] for s in samples]
         src_texts = [s.get(cls.KEY_SRC_TEXT, cls.DEFAULT_SRC_TEXT) for s in samples]
-        src_text_reprs = [s.get(cfg.mt_model_name, "") for s in samples]
         speakers = [s.get(cls.KEY_SPEAKER, cls.DEFAULT_SPEAKER) for s in samples]
         src_langs = [s.get(cls.KEY_SRC_LANG, cls.DEFAULT_LANG) for s in samples]
         tgt_langs = [s.get(cls.KEY_TGT_LANG, cls.DEFAULT_LANG) for s in samples]
@@ -337,7 +339,6 @@ class SpeechToTextJointDatasetCreator(SpeechToTextDatasetCreator):
             src_langs=src_langs,
             tgt_langs=tgt_langs,
             ids=ids,
-            src_text_reprs=src_text_reprs,
             tgt_dict=tgt_dict,
             src_dict=src_dict,
             pre_tokenizer=pre_tokenizer,
