@@ -524,9 +524,6 @@ class SiameseSpeechTextEncoders(FairseqEncoder):
         if _hasattr(self, "context_encoder") and self.cfg.context_encoder.freeze:
             logger.info(f"Freezing context encoder ...")
             for n, p in self.context_encoder.named_parameters():
-                if "layers.0.self_attn_layer_norm" in n:
-                    logger.info(f"- Not freezing {n}")
-                    continue
                 logger.info(f"- freezing {n}")
                 p.requires_grad = False
         
