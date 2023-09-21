@@ -8,6 +8,7 @@ import logging
 import math
 from dataclasses import dataclass, field
 from pathlib import Path
+import json
 
 import torch
 import torch.nn.functional as F
@@ -160,7 +161,7 @@ class CtcWassersteinCriterion(CtcCriterion):
             extra[f"wass_loss_{layer_id}"] = 0.0
 
         if self.calculate_ctc:
-            ctc_loss, extra = self.compute_ctc_loss(
+            ctc_loss, extra, ctc_probs, ctc_loss_per_example, ctc_sep_loss_per_example = self.compute_ctc_loss(
                 model, net_output, encoder_out, sample["target"], extra
             )
             if self.ctc_weight > 0.0:
@@ -187,7 +188,7 @@ class CtcWassersteinCriterion(CtcCriterion):
             text_lens = text_lens.repeat(m)
             text_padding_mask = text_padding_mask.repeat(m, 1)
             
-            wass_loss = self.compute_wass_loss(speech_out, speech_lens, speech_padding_mask, text_out, text_lens, text_padding_mask, ids=sample["example_id"])
+            wass_loss = self.compute_wass_loss(speech_out, speech_lens, speech_padding_mask, text_out, text_lens, text_padding_mask)
             
             extra["wass_loss"] = wass_loss[:B].sum()
             if self.ot_weight > 0.0:
@@ -196,7 +197,22 @@ class CtcWassersteinCriterion(CtcCriterion):
             for i, layer_id in enumerate(self.ot_student_aux_layers):
                 extra[f"wass_loss_{layer_id}"] = wass_loss[B*(i+1):B*(i+2)].sum()
                 loss += self.ot_aux_weights[i] * extra[f"wass_loss_{layer_id}"]
-    
+            
+        if not model.training and self.debug_save_dir and self.save:
+            for i in range(len(sample['example_id'])):
+                torch.save(
+                        {
+                            "text_len": text_lens[i].item(),
+                            "speech_len": speech_lens[i].item(),
+                            "wass_loss": wass_loss[i].item(),
+                            "speech_out": speech_out[:speech_lens[i], i].detach().cpu().clone(),
+                            "text_out": text_out[:text_lens[i], i].detach().cpu().clone(),
+                            "ctc_probs": ctc_probs[:net_input["src_lengths"][i], i].detach().cpu().clone(),
+                            "ctc_loss": ctc_loss_per_example[i].detach().cpu().clone().item(),
+                            "ctc_sep_loss": ctc_sep_loss_per_example[i].detach().cpu().clone().item(),
+                            "ctc_targets": sample["target"][i].detach().cpu().clone(),
+                        }, self.debug_save_dir / f"{sample['example_id'][i]}.pt")
+                        
         logging_output = {
             "loss": utils.item(loss.data)
             if loss != 0.0
@@ -238,10 +254,9 @@ class CtcWassersteinCriterion(CtcCriterion):
             logging_output["speech_text_len_ratio"] = utils.item(
                 (speech_lens[:B].float() / text_lens[:B].float()).data.sum()
             )
-
-        if "num_predicted_sep" in extra:
-            logging_output["num_predicted_sep"] = extra["num_predicted_sep"]
-            logging_output["num_correct_sep"] = extra["num_correct_sep"]
+            logging_output["speech_text_len_abs_err"] = utils.item(
+                (speech_lens[:B].float() - text_lens[:B].float()).abs().data.sum()
+            )
 
         if not model.training and extra["ctc_loss"] != 0.0 and self.eval_wer:
             logging_output = self.compute_wer(
@@ -268,30 +283,20 @@ class CtcWassersteinCriterion(CtcCriterion):
         pad_mask = (targets != self.blank_idx) & (targets != self.eos_idx)
         targets_flat = targets.masked_select(pad_mask)
         target_lengths = pad_mask.sum(-1)
-
-        # separator stats
-        sep_preds = (lprobs.argmax(-1) == self.sep_idx).long()
-        num_predicted_sep = torch.tensor(0, device=sep_preds.device, dtype=torch.long)
-        for i in range(sep_preds.size(1)):
-            # real number of prerdicted separators
-            num_predicted_sep += sep_preds[:, i].unique_consecutive().sum()
-        num_correct_sep = (targets_flat == self.sep_idx).sum()
-
-        extra["num_predicted_sep"] = num_predicted_sep
-        extra["num_correct_sep"] = num_correct_sep
         
         if self.ctc_weight:
             with torch.backends.cudnn.flags(enabled=False):
-                ctc_loss = F.ctc_loss(
+                ctc_loss_per_example = F.ctc_loss(
                     lprobs,
                     targets_flat,
                     input_lengths,
                     target_lengths,
                     blank=self.blank_idx,
-                    reduction="sum",
+                    reduction='none',
                     zero_infinity=self.zero_infinity,
                 )
             
+            ctc_loss = ctc_loss_per_example.sum()
             extra["ctc_loss"] = ctc_loss
         
         if self.eval_wer:
@@ -312,19 +317,20 @@ class CtcWassersteinCriterion(CtcCriterion):
             lprobs_sep[:, :, self.unk_idx] = torch.logsumexp(lprobs[:, :, combine_mask], dim=-1)
 
             with torch.backends.cudnn.flags(enabled=False):
-                ctc_sep_loss = F.ctc_loss(
+                ctc_sep_loss_per_example = F.ctc_loss(
                     lprobs_sep,
                     targets_flat_sep,
                     input_lengths,
                     target_lengths,
                     blank=self.blank_idx,
-                    reduction="sum",
+                    reduction="none",
                     zero_infinity=self.zero_infinity,
                 )
-                
+            
+            ctc_sep_loss = ctc_sep_loss_per_example.sum()
             extra["ctc_sep_loss"] = ctc_sep_loss
 
-        return ctc_loss, extra
+        return ctc_loss, extra, lprobs.exp(), ctc_loss_per_example, ctc_sep_loss_per_example
     
     def compute_wer(self, lprobs, sample, input_lengths, logging_output):
 
@@ -406,7 +412,7 @@ class CtcWassersteinCriterion(CtcCriterion):
                 text_padding_mask = lengths_to_padding_mask(text_lens)
         return text_out, text_lens, text_padding_mask
     
-    def compute_wass_loss(self, speech_out, speech_lens, speech_padding_mask, text_out, text_lens, text_padding_mask, ids=None):
+    def compute_wass_loss(self, speech_out, speech_lens, speech_padding_mask, text_out, text_lens, text_padding_mask):
 
         S, B, _ = speech_out.size()
         T = text_out.size()[0]
@@ -450,17 +456,6 @@ class CtcWassersteinCriterion(CtcCriterion):
                 text_weights.float(),
                 text_out.float().transpose(0, 1).contiguous()
             )
-            
-        if self.save:
-            for i in range(B):
-                torch.save(
-                    {
-                        "speech_out": speech_out[:speech_lens[i], i, :-1].detach().cpu().clone(),
-                        "text_out": text_out[:text_lens[i], i, :-1].detach().cpu().clone(),
-                        "wass_loss": wass_loss[i].detach().cpu().clone()
-                    }, 
-                    self.debug_save_dir / f"{ids[i]}_last.pt"
-                )
         
         return wass_loss
 
@@ -512,21 +507,17 @@ class CtcWassersteinCriterion(CtcCriterion):
                         wass_loss_sum / sample_size / math.log(2),
                         sample_size,
                         round=3,
-                    )
-
-        num_predicted_sep = utils.item(
-            sum(log.get("num_predicted_sep", 0) for log in logging_outputs)
-        )
-        num_correct_sep = utils.item(
-            sum(log.get("num_correct_sep", 0) for log in logging_outputs)
-        )
-        sep_pred_ratio = num_predicted_sep / num_correct_sep
-        metrics.log_scalar("sep_pred_ratio", sep_pred_ratio, round=3)        
+                    )   
         
         speech_text_len_ratio = utils.item(
             sum(log.get("speech_text_len_ratio", 0) for log in logging_outputs)
         ) / nsentences
         metrics.log_scalar("speech_text_len_ratio", speech_text_len_ratio, round=3)
+        speech_text_len_abs_err = utils.item(
+            sum(log.get("speech_text_len_abs_err", 0) for log in logging_outputs)
+        ) / nsentences
+        metrics.log_scalar("speech_text_len_abs_err", speech_text_len_abs_err, round=3)
+
 
         compression_rate = utils.item(
             sum(log.get("compression_rate", 0) for log in logging_outputs)
