@@ -31,6 +31,10 @@ class SiameseZeroShotS2TModelConfig(FairseqDataclass):
         default=False,
         metadata={"help": "whether to load submodules"}
     )
+    max_source_poistions: int = field(
+        default=1500000,
+        metadata={"help": "max source positions"}
+    )
 
 @register_model("siamese_zs_s2t_model", dataclass=SiameseZeroShotS2TModelConfig)
 class SiameseZeroShotS2TModel(BaseFairseqModel):
@@ -48,6 +52,7 @@ class SiameseZeroShotS2TModel(BaseFairseqModel):
         model_args = OmegaConf.create(model_args)
         task.src_dict = task.tgt_dict
         encoder = SiameseEncodersWithCTC.build_model(model_args, task)
+        encoder.max_source_positions = cfg.max_source_poistions
         if not cfg.not_load_submodules:
             logger.info(f"Loading encoder from {cfg.encoder_path} ...")
             missing_keys, unexpected_keys = encoder.load_state_dict(ckpt["model"], strict=False)
@@ -95,7 +100,7 @@ class SiameseZeroShotS2TModel(BaseFairseqModel):
         return decoder_out
 
     def max_positions(self):
-        return (self.encoder.max_positions()[0], self.decoder.max_positions())
+        return (self.encoder.max_source_positions, self.decoder.max_positions())
 
     def max_decoder_positions(self):
         return self.decoder.max_positions()
