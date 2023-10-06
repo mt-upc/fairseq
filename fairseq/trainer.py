@@ -564,9 +564,17 @@ class Trainer(object):
                         layer._prune_fc_layer(remove_index=remove_index)
                     logger.info(self.model)
 
-                self.model.load_state_dict(
-                    state["model"], strict=True, model_cfg=self.cfg.model
-                )
+                if self.cfg.model._name == "siamese_encoders_with_ctc" and self.cfg.model.context_encoder.freeze:
+                    state["model"] = {k: v for k, v in state["model"].items() if "context_encoder" not in k}
+                    missing_keys, unexpected_keys = self.model.load_state_dict(
+                        state["model"], strict=False, model_cfg=self.cfg.model
+                    )
+                    if missing_keys: logger.info(f"Missing keys in state dict (some may correspond to resetted parameters):\n\t" + '\n\t'.join(missing_keys))
+                    if unexpected_keys: logger.info(f"Unexpected keys in state dict:\n\t" + '\n\t'.join(unexpected_keys))
+                else:
+                    self.model.load_state_dict(
+                        state["model"], strict=True, model_cfg=self.cfg.model
+                    )
                 # save memory for later steps
                 del state["model"]
                 if utils.has_parameters(self.get_criterion()):
