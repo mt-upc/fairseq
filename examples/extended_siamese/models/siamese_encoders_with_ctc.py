@@ -237,10 +237,10 @@ class SiameseSpeechTextEncoders(FairseqEncoder):
         try:
             ckpt = torch.load(cfg.path)
         except:
-            if "600M" in cfg.path:
-                ckpt = torch.load('/home/usuaris/scratch/ioannis.tsiamas/pretrained_models/nllb/nllb-200-distilled-600M.pt')
-            else:
+            if "1.3" in cfg.path:
                 ckpt = torch.load('/home/usuaris/scratch/ioannis.tsiamas/pretrained_models/nllb/nllb-200-distilled-1.3B.pt')
+            else:
+                ckpt = torch.load('/home/usuaris/scratch/ioannis.tsiamas/pretrained_models/nllb/nllb-200-distilled-600M.pt')
         
         if ckpt["args"] is None:
             model_args = ckpt["cfg"]["model"]
