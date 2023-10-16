@@ -303,6 +303,7 @@ class CtcWassersteinCriterion(CtcCriterion):
             extra["input_lengths"] = input_lengths
 
         extra["ctc_sep_loss"] = 0
+        ctc_sep_loss_per_example = None
         if self.ctc_sep_weight > 0.0:
             targets_flat_sep = targets_flat.clone()
             targets_flat_sep[targets_flat_sep != self.sep_idx] = self.unk_idx
