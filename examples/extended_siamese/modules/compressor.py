@@ -68,14 +68,19 @@ class TransformerEncoderLayers(nn.Module):
         return x
 
 class BasicPooling(nn.Module):
-    def __init__(self, pooling_fn: str, embed_dim: int):
+    def __init__(self, pooling_fn: str, embed_dim: int, layernorm=False):
         super().__init__()
         self.out = nn.Linear(embed_dim, embed_dim)
         self.pooling_fn = pooling_fn
+        if layernorm:
+            self.layer_norm = LayerNorm(embed_dim)
         
     def forward(self, x, mask):
         # x: [B, N, D]
         # mask: [B, N]
+        
+        if hasattr(self, "layer_norm"):
+            x = self.layer_norm(x)
         
         if self.pooling_fn == "mean":
             lens = (~mask).to(torch.long).sum(dim=1).to(x.dtype) # [B]
@@ -164,6 +169,10 @@ class LevelCompressorConfig(FairseqDataclass):
         default=0.0,
         metadata={"help": "dropout rate for every module in this level compressor"},
     )
+    layernorm: bool = field(
+        default=False,
+        metadata={"help": "whether to use layer normalization before pooling"},
+    )
 
 
 @dataclass
@@ -200,7 +209,7 @@ class Compressor(nn.Module):
         elif lvl_cfg.pooling_fn == "cls":
             pooling_module = CLSPooling(self.embed_dim, lvl_cfg.cls_transformer_layers, lvl_cfg.dropout) 
         else: # mean or max
-            pooling_module = BasicPooling(lvl_cfg.pooling_fn, self.embed_dim)
+            pooling_module = BasicPooling(lvl_cfg.pooling_fn, self.embed_dim, lvl_cfg.layernorm)
 
         post_adaptor = None
         if lvl_cfg.post_pooling_adaptor:
