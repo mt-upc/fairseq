@@ -32,7 +32,7 @@ class SiameseZeroShotS2TModelConfig(FairseqDataclass):
         metadata={"help": "whether to load submodules"}
     )
     max_source_poistions: int = field(
-        default=1500000,
+        default=2400000,
         metadata={"help": "max source positions"}
     )
 
