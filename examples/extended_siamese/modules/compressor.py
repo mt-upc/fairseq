@@ -218,163 +218,119 @@ class Compressor(nn.Module):
             )
 
         return pooling_module, post_adaptor
-
-    def char_compression(self, x, preds):
-        # x: B x T x D
-        # preds: B x T
-
+    
+    def char_compression_new(self, x, preds):
         B, T, D = x.size()
+        device = x.device
+        dtype = x.dtype
+
+        # add a vector of -1 to know where each example ends after flattening the batch
+        preds = torch.cat([-torch.ones(B, 1, device=device, dtype=torch.long), preds], dim=1).view(-1)
+        x = torch.cat([torch.zeros(B, 1, D, device=device, dtype=dtype), x], dim=1).view(-1, D)
+
+        # get points of consecutive preds
+        preds, counts = preds.unique_consecutive(return_counts=True)
         
-        # get the unique consecutive elements and their counts
-        counts_list = []
-        compr_preds = []
-        for i in range(B):
-            # p: compressed sequence, [N_i]
-            # c: repeating counts for each j element of p, [N_i]
-            p, c = preds[i].unique_consecutive(return_counts=True)
-            counts_list.append(c)
-            compr_preds.append(p)
-
-        counts = pad_sequence(counts_list, batch_first=True, padding_value=0)
-        compr_preds = pad_sequence(
-            compr_preds, batch_first=True, padding_value=self.blank_idx
-        )
-        valid_chars = compr_preds.ne(self.blank_idx)
-
-        # create a tensor to fill-in
-        n = counts.size(1) # max number of predictions for the sequences
-        m = counts[valid_chars].max().item() # max length of the non-blank predictions
-        x_chars = torch.zeros(B, n, m, D, device=x.device, dtype=x.dtype)
-
-        for i in range(B):
-            x_chars_i = torch.split(x[i], counts_list[i].tolist()) # Tuple[2d tensor]
-            x_chars_i = pad_sequence(
-                x_chars_i, batch_first=True, padding_value=0
-            )  # n_i x m_i x D
-            # we dont care about the length of the blank predictions
-            if x_chars_i.size(1) > m:
-                x_chars_i = x_chars_i[:, :m]
-            x_chars[i, :x_chars_i.size(0), :x_chars_i.size(1)] = x_chars_i
-
-        x_chars = x_chars.view(B * n, m, D)
-        counts = counts.view(B * n)
-        valid_chars = valid_chars.view(B * n)
+        # split in representations of same chars
+        x = torch.split(x, counts.tolist())
         
-        x_compr = torch.zeros(B * n, D, device=x.device, dtype=x.dtype)
-        x_compr[valid_chars] = self.char_pooling_module(
-            x_chars[valid_chars],
-            lengths_to_padding_mask(counts[valid_chars])
-        )  # B * n x D
-
-        x_compr = x_compr.view(B, n, D)  # B x n x D
-
-        compr_valid_mask = compr_preds != self.blank_idx  # B x n
-        compr_valid_lens = compr_valid_mask.sum(dim=-1)  # B
-        
-        # correction for completelly empty sequence
-        empty_examples = compr_valid_lens == 0
-        if empty_examples.any():
-            compr_valid_mask[empty_examples, 0] = True
-            compr_valid_lens[empty_examples] = 1
-            compr_preds[empty_examples, 0] = self.blank_idx
-
         # remove blanks
-        x_compr = torch.split(
-            x_compr[compr_valid_mask], compr_valid_lens.tolist()
-        )  # Tuple[tensor] of size B
-        x_compr = pad_sequence(x_compr, batch_first=True, padding_value=0)  # B x N x D
-        compr_preds = torch.split(
-            compr_preds[compr_valid_mask], compr_valid_lens.tolist()
-        )  # Tuple[tensor] of size B
-        compr_preds = pad_sequence(
-            compr_preds, batch_first=True, padding_value=self.blank_idx
-        )  # B x N
+        valid_mask = preds != self.blank_idx
+        preds = preds[valid_mask]
+        counts = counts[valid_mask]
+        x = [x_i for x_i, v_i in zip(x, valid_mask) if v_i]
+        
+        # pack into tensor
+        x = pad_sequence(x, batch_first=True, padding_value=0)
 
-        mask = lengths_to_padding_mask(compr_valid_lens)  # B x N
+        # mean pooling
+        x = x.sum(dim=1) / counts.unsqueeze(1)
+        x = self.char_pooling_module.out(x)
 
+        # find split points for retrieving the examples
+        split_points = (preds == -1).nonzero(as_tuple=True)[0]
+        split_points = torch.cat([split_points, torch.tensor([len(preds)], device=device)])
+        split_points = (split_points[1:] - split_points[:-1]).tolist()
+
+        # split into examples
+        x = torch.split(x, split_points)
+        preds = torch.split(preds, split_points)
+        lens = torch.tensor([len(x_i) for x_i in x], device=device)
+
+        # pack into tensors
+        x = pad_sequence(x, batch_first=True, padding_value=0)
+        preds = pad_sequence(preds, batch_first=True, padding_value=self.blank_idx)
+
+        # remove the parts we add to identify the bounds for each example
+        x = x[:, 1:]
+        preds = preds[:, 1:]
+        lens -= 1
+
+        mask = lengths_to_padding_mask(lens)
+        
+        # acount for empty examples
+        empty_examples = lens == 0
+        if empty_examples.any():
+            mask[empty_examples, 0] = True
+            lens[empty_examples] = 1
+            preds[empty_examples, 0] = self.sep_idx
+
+        # process representation
         if self.char_post_adaptor is not None:
-            x_compr = self.char_post_adaptor(x_compr)
+            x = self.char_post_adaptor(x)
 
-        return x_compr, mask, compr_valid_lens, compr_preds
+        return x, mask, lens, preds
     
     def token_compression(self, x, lens, preds):
         # x: B x T x D
         # lens: B
         # preds: B x T
-
-        sep_mask = preds.eq(self.sep_idx)  # B x T
-
-        B, T, D = x.size()
-        dev = x.device
-
-        # get token lengths
-        token_lengths_list = []
-        for i in range(B):
-            # Find the indices where the separators are present in the sentence
-            sep_indices = sep_mask[i].nonzero().squeeze(1)
-
-            # account for missing last separator
-            no_last_sep = preds[i, lens[i] - 1] != self.sep_idx
-            if no_last_sep:
-                sep_indices = torch.cat(
-                    [sep_indices, torch.tensor([lens[i]], device=dev)]
-                )
-
-            # account for consecutive separators
-            diffs = torch.diff(sep_indices, append=sep_indices[-1].unsqueeze(0) + 2)
-            transitions = diffs != 1
-            if transitions.any():
-                # Select only the first element of each set of consecutive numbers
-                sep_indices = sep_indices[transitions]
-
-            # Compute token lengths
-            sep_indices[: lens[i]] += 1
-            zero_tensor = torch.tensor([0], device=dev)
-            token_lengths = torch.diff(sep_indices, prepend=zero_tensor)
-            if no_last_sep:
-                token_lengths[-1] -= 1
-
-            token_lengths_list.append(token_lengths)
-
-        token_lengths = pad_sequence(
-            token_lengths_list, batch_first=True, padding_value=0
-        )
-
-        # create a tensor to fill-in
-        n = token_lengths.size(1)
-        m = token_lengths.max()
-        x_tokens = torch.zeros(B, n, m, D, device=x.device, dtype=x.dtype)
-
-        for i in range(B):
-            if lens[i] > 0:
-                x_tokens_i = torch.split(
-                    x[i, :lens[i]], token_lengths_list[i].tolist()
-                )  # Tuple[2d tensor]
-            x_tokens_i = pad_sequence(
-                x_tokens_i, batch_first=True, padding_value=0
-            )  # n_i x m_i x D
-            x_tokens[i, : x_tokens_i.size(0), : x_tokens_i.size(1)] = x_tokens_i
-
-        x_tokens = x_tokens.view(B * n, m, D)
-        token_lengths = token_lengths.view(B * n)
-        token_padding_mask = lengths_to_padding_mask(token_lengths)
-        valid_tokens = token_padding_mask.eq(0).any(dim=-1)
-
-        x_compr = torch.zeros(B * n, D, device=x.device, dtype=x.dtype)
-        x_compr[valid_tokens] = self.token_pooling_module(
-            x_tokens[valid_tokens],
-            lengths_to_padding_mask(token_lengths[valid_tokens])
-        )  # B * n x D
         
-        x_compr = x_compr.view(B, n, D)  # B x num_words x D
-        x_compr_lens = (token_lengths.view(B, -1) != 0).sum(dim=-1)  # B
-        x_compr_mask = lengths_to_padding_mask(x_compr_lens)  # B x num_words
-        x_compr.masked_fill_(x_compr_mask.unsqueeze(-1), 0)
-
+        B, T, D = x.size()
+        device = x.device
+        dtype = x.dtype
+        
+        num_tokens = preds.eq(self.sep_idx).sum(dim=1)
+        
+        # unpad and unpack to list of tensors
+        preds = [preds[i, :lens[i]] for i in range(B)]
+        x = [x[i, :lens[i]] for i in range(B)]
+        
+        for i in range(B):
+            if preds[i][-1] != self.sep_idx:
+                logger.info(f"Adding separator token at example with length {lens[i]}")
+                preds[i] = torch.cat([preds[i], torch.tensor([self.sep_idx], device=device, dtype=torch.long)])
+                x[i] = torch.cat([x[i], torch.zeros(1, D, device=device, dtype=dtype)])
+                num_tokens[i] += 1
+                
+        preds = torch.cat(preds)
+        x = torch.cat(x)
+        
+        split_points = preds.eq(self.sep_idx).nonzero(as_tuple=True)[0] + 1
+        split_points = torch.cat([torch.tensor([0], device=device, dtype=torch.long), split_points])
+        split_points = (split_points[1:] - split_points[:-1]).tolist()
+        
+        x = torch.split(x, split_points) # Tuple[2d tensor]
+        x_tokens_lens = torch.tensor([len(x_i) for x_i in x], device=device, dtype=dtype)
+        x = pad_sequence(x, batch_first=True, padding_value=0) # K x ? x D
+        
+        x = x.sum(dim=1) / x_tokens_lens.unsqueeze(1) # K x D
+        x = self.token_pooling_module.out(x)
+        
+        # get split indices from num_tokens
+        split_points = num_tokens.cumsum(dim=0)
+        split_points = torch.cat([torch.tensor([0], device=device, dtype=torch.long), split_points])
+        split_points = (split_points[1:] - split_points[:-1]).tolist()
+        
+        x = torch.split(x, split_points)
+        x = pad_sequence(x, batch_first=True, padding_value=0) # B x ? x D
+        
+        mask = lengths_to_padding_mask(num_tokens)
+    
         if self.token_post_adaptor is not None:
-            x_compr = self.token_post_adaptor(x_compr)
-            
-        return x_compr, x_compr_mask, x_compr_lens
-            
+            x = self.token_post_adaptor(x)
+        
+        return x, mask, num_tokens    
+
     def forward(self, **kwargs):
         raise NotImplementedError("Use the compression method instead")
