@@ -75,73 +75,78 @@ class BasicPooling(nn.Module):
         if layernorm:
             self.layer_norm = LayerNorm(embed_dim)
         
-    def forward(self, x, mask):
+    def forward(self, x, lens):
         # x: [B, N, D]
-        # mask: [B, N]
+        # lens: [B]
         
         if hasattr(self, "layer_norm"):
             x = self.layer_norm(x)
         
         if self.pooling_fn == "mean":
-            lens = (~mask).to(torch.long).sum(dim=1).to(x.dtype) # [B]
-            lens[lens.eq(0.0)] = 1.5  # to avoid division by 0
-            y = torch.sum(x, dim=1) / lens.unsqueeze(1) # [B, D]
+            x = torch.sum(x, dim=1) / lens.to(dtype=x.dtype).unsqueeze(1) # [B, D]
         elif self.pooling_fn == "max":
-            y = torch.max(x, dim=1)[0] # [B, D]
+            x = torch.max(x, dim=1)[0] # [B, D]
             
-        y = self.out(y) # [B, D]
+        x = self.out(x) # [B, D]
             
-        return y
+        return x
     
 class CLSPooling(nn.Module):
     def __init__(self, embed_dim, num_transformer_layers=1, dropout_rate=0.0):
         super().__init__()
         self.cls_token = torch.empty(1, 1, embed_dim)
-        nn.init.xavier_uniform_(self.cls_token)
+        nn.init.normal_(self.cls_token, mean=0.0, std=0.25) # to match the norm of x
         
         self.transformer = TransformerEncoderLayers(embed_dim, num_transformer_layers, dropout_rate)
         
-    def forward(self, x, mask):
+    def forward(self, x, lens):
         # x: [B, N, D]
         # mask: [B, N]
+
+        # prepend cls token
+        x = torch.cat(
+            [
+                self.cls_token.to(dtype=x.dtype, device=x.device).repeat(x.size(0), 1, 1), # B x 1 x D
+                x
+            ],
+        dim=1) # [B, N+1, D]
         
-        cls_token = self.cls_token.repeat(x.size(0), 1, 1).to(dtype=x.dtype, device=x.device) # [B, 1, D]
-        cls_mask = torch.zeros(x.size(0), 1, dtype=mask.dtype, device=mask.device) # [B, 1]
-        x = torch.cat([cls_token, x], dim=1) # [B, N+1, D]
-        mask = torch.cat([cls_mask, mask], dim=1) # [B, N+1]
+        mask = lengths_to_padding_mask(lens+1)
         
         x = self.transformer(x, mask) # [B, N+1, D]
+        x = x[:, 0] # [B, D]
         
-        y = x[:, 0] # [B, D]
-        
-        return y
+        return x
     
 class AttentionPooling(nn.Module):
     def __init__(self, embed_dim, hidden_dim, dropout_rate):
         super().__init__()
 
         self.attention = nn.Sequential(
+            LayerNorm(embed_dim),
             nn.Linear(embed_dim, hidden_dim),
-            nn.ReLU(),
+            nn.GELU(),
             FairseqDropout(dropout_rate),
-            nn.Linear(hidden_dim, 1)
+            nn.Linear(hidden_dim, 1),
         )
 
         self.out = nn.Linear(embed_dim, embed_dim)
         
-    def forward(self, x, mask):
+    def forward(self, x, lens):
         # x: [B, N, D]
-        # mask: [B, N]
+        # lens: [B]
+        
+        mask = lengths_to_padding_mask(lens)
 
         attn_scores = self.attention(x).squeeze(-1) # [B, N]
         attn_scores = attn_scores.masked_fill(mask, float('-inf')) # [B, N]
 
         attn_weights = F.softmax(attn_scores, dim=-1).unsqueeze(-1) # [B, N, 1]
 
-        y = torch.sum(attn_weights * x, dim=1) # [B, D]
-        y = self.out(y) # [B, D]
+        x = torch.sum(attn_weights * x, dim=1) # [B, D]
+        x = self.out(x) # [B, D]
 
-        return y
+        return x
 
 
 @dataclass
@@ -219,7 +224,7 @@ class Compressor(nn.Module):
 
         return pooling_module, post_adaptor
     
-    def char_compression_new(self, x, preds):
+    def char_compression(self, x, preds):
         B, T, D = x.size()
         device = x.device
         dtype = x.dtype
@@ -243,9 +248,8 @@ class Compressor(nn.Module):
         # pack into tensor
         x = pad_sequence(x, batch_first=True, padding_value=0)
 
-        # mean pooling
-        x = x.sum(dim=1) / counts.unsqueeze(1)
-        x = self.char_pooling_module.out(x)
+        # reduce dim 1
+        x = self.char_pooling_module(x, counts)
 
         # find split points for retrieving the examples
         split_points = (preds == -1).nonzero(as_tuple=True)[0]
@@ -268,7 +272,7 @@ class Compressor(nn.Module):
 
         mask = lengths_to_padding_mask(lens)
         
-        # acount for empty examples
+        # account for empty examples (just a sep token)
         empty_examples = lens == 0
         if empty_examples.any():
             mask[empty_examples, 0] = True
@@ -278,7 +282,7 @@ class Compressor(nn.Module):
         # process representation
         if self.char_post_adaptor is not None:
             x = self.char_post_adaptor(x)
-
+        
         return x, mask, lens, preds
     
     def token_compression(self, x, lens, preds):
@@ -290,47 +294,50 @@ class Compressor(nn.Module):
         device = x.device
         dtype = x.dtype
         
-        num_tokens = preds.eq(self.sep_idx).sum(dim=1)
+        # new lengths after compression
+        new_lens = preds.eq(self.sep_idx).sum(dim=1)
         
         # unpad and unpack to list of tensors
         preds = [preds[i, :lens[i]] for i in range(B)]
         x = [x[i, :lens[i]] for i in range(B)]
         
+        # make sure every example ends with a separator
         for i in range(B):
             if preds[i][-1] != self.sep_idx:
-                logger.info(f"Adding separator token at example with length {lens[i]}")
                 preds[i] = torch.cat([preds[i], torch.tensor([self.sep_idx], device=device, dtype=torch.long)])
                 x[i] = torch.cat([x[i], torch.zeros(1, D, device=device, dtype=dtype)])
-                num_tokens[i] += 1
-                
+                new_lens[i] += 1
+        
+        # flatten
         preds = torch.cat(preds)
         x = torch.cat(x)
         
+        # split points according to separators
         split_points = preds.eq(self.sep_idx).nonzero(as_tuple=True)[0] + 1
         split_points = torch.cat([torch.tensor([0], device=device, dtype=torch.long), split_points])
         split_points = (split_points[1:] - split_points[:-1]).tolist()
         
+        # re-arrange in 3d [total_num_tokens x max(count) x D]
         x = torch.split(x, split_points) # Tuple[2d tensor]
-        x_tokens_lens = torch.tensor([len(x_i) for x_i in x], device=device, dtype=dtype)
-        x = pad_sequence(x, batch_first=True, padding_value=0) # K x ? x D
+        counts = torch.tensor([len(x_i) for x_i in x], device=device, dtype=torch.long)
+        x = pad_sequence(x, batch_first=True, padding_value=0)
         
-        x = x.sum(dim=1) / x_tokens_lens.unsqueeze(1) # K x D
-        x = self.token_pooling_module.out(x)
+        # reduce dim 1
+        x = self.token_pooling_module(x, counts)
         
-        # get split indices from num_tokens
-        split_points = num_tokens.cumsum(dim=0)
+        # reconstruct the batch
+        split_points = new_lens.cumsum(dim=0)
         split_points = torch.cat([torch.tensor([0], device=device, dtype=torch.long), split_points])
         split_points = (split_points[1:] - split_points[:-1]).tolist()
-        
         x = torch.split(x, split_points)
         x = pad_sequence(x, batch_first=True, padding_value=0) # B x ? x D
         
-        mask = lengths_to_padding_mask(num_tokens)
+        mask = lengths_to_padding_mask(new_lens)
     
         if self.token_post_adaptor is not None:
             x = self.token_post_adaptor(x)
         
-        return x, mask, num_tokens    
+        return x, mask, new_lens    
 
     def forward(self, **kwargs):
         raise NotImplementedError("Use the compression method instead")
