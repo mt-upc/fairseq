@@ -250,9 +250,6 @@ class CtcWassersteinCriterion(CtcCriterion):
                 )
         
         if self.calculate_ot:
-            logging_output["speech_text_len_ratio"] = utils.item(
-                (speech_lens[:B].float() / text_lens[:B].float()).data.sum()
-            )
             logging_output["speech_text_len_abs_err"] = utils.item(
                 (speech_lens[:B].float() - text_lens[:B].float()).abs().data.sum()
             )
@@ -508,17 +505,11 @@ class CtcWassersteinCriterion(CtcCriterion):
                         sample_size,
                         round=3,
                     )   
-        
-        speech_text_len_ratio = utils.item(
-            sum(log.get("speech_text_len_ratio", 0) for log in logging_outputs)
-        ) / nsentences
-        metrics.log_scalar("speech_text_len_ratio", speech_text_len_ratio, round=3)
+
         speech_text_len_abs_err = utils.item(
             sum(log.get("speech_text_len_abs_err", 0) for log in logging_outputs)
         ) / nsentences
         metrics.log_scalar("speech_text_len_abs_err", speech_text_len_abs_err, round=3)
-
-
         compression_rate = utils.item(
             sum(log.get("compression_rate", 0) for log in logging_outputs)
         )
@@ -531,7 +522,6 @@ class CtcWassersteinCriterion(CtcCriterion):
             sum(log.get("token_compression_rate", 0) for log in logging_outputs)
         )
         metrics.log_scalar("token_compression_rate", token_compression_rate / nsentences, round=3)
-
         metrics.log_scalar("ntokens", ntokens)
         metrics.log_scalar("nsentences", nsentences)
         
