@@ -47,7 +47,7 @@ class TransformerEncoderLayers(nn.Module):
         cfg.dropout = dropout_rate
         cfg.attention_dropout = dropout_rate
         cfg.activation_dropout = dropout_rate
-        cfg.encoder.attention_heads = 16 if embed_dim == 1024 else 8
+        cfg.encoder.attention_heads = 16
 
         self.layers = nn.ModuleList(
             [TransformerEncoderLayerBase(cfg) for _ in range(num_layers)]
@@ -68,26 +68,31 @@ class TransformerEncoderLayers(nn.Module):
         return x
 
 class BasicPooling(nn.Module):
-    def __init__(self, pooling_fn: str, embed_dim: int, layernorm=False):
+    def __init__(self, pooling_fn: str, embed_dim: int, output_layer=False):
         super().__init__()
-        self.out = nn.Linear(embed_dim, embed_dim)
+        
         self.pooling_fn = pooling_fn
-        if layernorm:
-            self.layer_norm = LayerNorm(embed_dim)
+        
+        if self.pooling_fn == "mean-max":
+            assert output_layer
+            self.out = nn.Linear(embed_dim*2, embed_dim)
+        else:
+            if output_layer:
+                self.out = nn.Linear(embed_dim, embed_dim)
         
     def forward(self, x, lens):
         # x: [B, N, D]
         # lens: [B]
         
-        if hasattr(self, "layer_norm"):
-            x = self.layer_norm(x)
-        
         if self.pooling_fn == "mean":
             x = torch.sum(x, dim=1) / lens.to(dtype=x.dtype).unsqueeze(1) # [B, D]
         elif self.pooling_fn == "max":
             x = torch.max(x, dim=1)[0] # [B, D]
-            
-        x = self.out(x) # [B, D]
+        elif self.pooling_fn == "mean-max":
+            x = torch.cat([torch.sum(x, dim=1) / lens.to(dtype=x.dtype).unsqueeze(1), torch.max(x, dim=1)[0]], dim=-1)
+        
+        if hasattr(self, "out"):
+            x = self.out(x) # [B, D]
             
         return x
     
@@ -123,7 +128,6 @@ class AttentionPooling(nn.Module):
         super().__init__()
 
         self.attention = nn.Sequential(
-            LayerNorm(embed_dim),
             nn.Linear(embed_dim, hidden_dim),
             nn.GELU(),
             FairseqDropout(dropout_rate),
@@ -151,32 +155,31 @@ class AttentionPooling(nn.Module):
 
 @dataclass
 class LevelCompressorConfig(FairseqDataclass):
-    pooling_fn: ChoiceEnum(["mean", "max", "attention", "cls"]) = field(
+    pooling_fn: ChoiceEnum(["mean", "max", "mean-max", "attention", "cls"]) = field(
         default="mean",
         metadata={"help": "pooling function for collapsing representations"},
     )
     attn_hidden_dim: int = field(
-        default=4096,
+        default=8192,
         metadata={"help": "hidden dimension for attention pooling"}
     )
-    cls_transformer_layers: int = field(
-        default=1,
-        metadata={"help": "number of transformer layers if pooling_fn is cls"},
+    transformer_layers: int = field(
+        default=0,
+        metadata={"help": "number of transformer layers if pooling_fn is cls, otherwise separate transformer"},
     )
     post_pooling_adaptor: bool = field(
         default=False, metadata={"help": "whether to use an adaptor after pooling"}
     )
     adaptor_dim: int = field(
-        default=4096,
+        default=8192,
         metadata={"help": "projection dimension for post-pooling adaptor"},
     )
     dropout: float = field(
         default=0.0,
         metadata={"help": "dropout rate for every module in this level compressor"},
     )
-    layernorm: bool = field(
-        default=False,
-        metadata={"help": "whether to use layer normalization before pooling"},
+    output_layer: bool = field(
+        default=False, metadata={"help": "whether to use a linear layer after pooling"}
     )
 
 
@@ -191,6 +194,9 @@ class CompressorConfig(FairseqDataclass):
     token_compression: Optional[LevelCompressorConfig] = field(
         default=None, metadata={"help": "configuration for token-level compression"}
     )
+    path: Optional[str] = field(
+        default=None, metadata={"help": "path to load the compressor from"}
+    )
 
 
 class Compressor(nn.Module):
@@ -202,27 +208,39 @@ class Compressor(nn.Module):
         self.sep_idx = sep_idx
 
         assert cfg.char_compression is not None
-        self.char_pooling_module, self.char_post_adaptor = self._init_modules(cfg.char_compression)
+        self.char_pooling_module, self.char_post_adaptor, self.char_pre_transformer = self._init_modules(cfg.char_compression)
 
         if cfg.token_compression is not None:
-            self.token_pooling_module, self.token_post_adaptor = self._init_modules(cfg.token_compression)
+            self.token_pooling_module, self.token_post_adaptor, self.token_pre_transformer = self._init_modules(cfg.token_compression)
+            
+        if cfg.path is not None:
+            logger.info(f"Loading compressor from {cfg.path}")
+            compressor_ckpt = torch.load(cfg.path)
+            self.char_post_adaptor.load_state_dict(compressor_ckpt["char_post_adaptor"])
+            self.token_pooling_module.load_state_dict(compressor_ckpt["token_pooling_module"])
+            self.token_post_adaptor.load_state_dict(compressor_ckpt["token_post_adaptor"])
 
     def _init_modules(self, lvl_cfg):
 
         if lvl_cfg.pooling_fn == "attention":
             pooling_module = AttentionPooling(self.embed_dim, lvl_cfg.attn_hidden_dim, lvl_cfg.dropout)    
         elif lvl_cfg.pooling_fn == "cls":
-            pooling_module = CLSPooling(self.embed_dim, lvl_cfg.cls_transformer_layers, lvl_cfg.dropout) 
-        else: # mean or max
-            pooling_module = BasicPooling(lvl_cfg.pooling_fn, self.embed_dim, lvl_cfg.layernorm)
+            assert lvl_cfg.transformer_layers > 0
+            pooling_module = CLSPooling(self.embed_dim, lvl_cfg.transformer_layers, lvl_cfg.dropout) 
+        else: # mean or max or mean-max
+            pooling_module = BasicPooling(lvl_cfg.pooling_fn, self.embed_dim, lvl_cfg.output_layer)
 
         post_adaptor = None
         if lvl_cfg.post_pooling_adaptor:
             post_adaptor = CompressionAdaptor(
                 self.embed_dim, lvl_cfg.adaptor_dim, lvl_cfg.dropout
             )
+            
+        pre_transformer = None
+        if lvl_cfg.transformer_layers > 0 and lvl_cfg.pooling_fn != "cls":
+            pre_transformer = TransformerEncoderLayers(self.embed_dim, lvl_cfg.transformer_layers, lvl_cfg.dropout)
 
-        return pooling_module, post_adaptor
+        return pooling_module, post_adaptor, pre_transformer
     
     def char_compression(self, x, preds):
         B, T, D = x.size()
@@ -249,6 +267,10 @@ class Compressor(nn.Module):
         x = pad_sequence(x, batch_first=True, padding_value=0)
 
         # reduce dim 1
+        if self.char_pre_transformer is not None:
+            mask = lengths_to_padding_mask(counts)
+            x = self.char_pre_transformer(x, mask)
+        
         x = self.char_pooling_module(x, counts)
 
         # find split points for retrieving the examples
@@ -321,6 +343,10 @@ class Compressor(nn.Module):
         x = torch.split(x, split_points) # Tuple[2d tensor]
         counts = torch.tensor([len(x_i) for x_i in x], device=device, dtype=torch.long)
         x = pad_sequence(x, batch_first=True, padding_value=0)
+        
+        if self.token_pre_transformer is not None:
+            mask = lengths_to_padding_mask(counts)
+            x = self.token_pre_transformer(x, mask)
         
         # reduce dim 1
         x = self.token_pooling_module(x, counts)
