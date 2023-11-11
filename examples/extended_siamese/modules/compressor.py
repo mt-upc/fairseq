@@ -99,7 +99,7 @@ class BasicPooling(nn.Module):
 class CLSPooling(nn.Module):
     def __init__(self, embed_dim, num_transformer_layers=1, dropout_rate=0.0):
         super().__init__()
-        self.cls_token = torch.empty(1, 1, embed_dim)
+        self.cls_token = nn.Parameter(torch.empty(1, 1, embed_dim))
         nn.init.normal_(self.cls_token, mean=0.0, std=0.25) # to match the norm of x
         
         self.transformer = TransformerEncoderLayers(embed_dim, num_transformer_layers, dropout_rate)
@@ -212,13 +212,9 @@ class Compressor(nn.Module):
 
         if cfg.token_compression is not None:
             self.token_pooling_module, self.token_post_adaptor, self.token_pre_transformer = self._init_modules(cfg.token_compression)
-            
+        
         if cfg.path is not None:
-            logger.info(f"Loading compressor from {cfg.path}")
-            compressor_ckpt = torch.load(cfg.path)
-            self.char_post_adaptor.load_state_dict(compressor_ckpt["char_post_adaptor"])
-            self.token_pooling_module.load_state_dict(compressor_ckpt["token_pooling_module"])
-            self.token_post_adaptor.load_state_dict(compressor_ckpt["token_post_adaptor"])
+            self._load_from_pretrained(cfg.path)
 
     def _init_modules(self, lvl_cfg):
 
@@ -241,7 +237,35 @@ class Compressor(nn.Module):
             pre_transformer = TransformerEncoderLayers(self.embed_dim, lvl_cfg.transformer_layers, lvl_cfg.dropout)
 
         return pooling_module, post_adaptor, pre_transformer
-    
+        
+    def _load_module_state(self, module_name, compressor_ckpt):
+        if hasattr(self, module_name) and getattr(self, module_name) is not None:
+            ckpt_key = f"{module_name}_out" if "out" in module_name else module_name
+            if ckpt_key in compressor_ckpt and compressor_ckpt[ckpt_key] is not None:
+                getattr(self, module_name).load_state_dict(compressor_ckpt[ckpt_key])
+                logger.info(f"Loaded {module_name} from checkpoint")
+            else:
+                logger.warning(f"Could not load {module_name} from checkpoint")
+
+    def _load_from_pretrained(self, path):
+        logger.info(f"Loading compressor from {path}")
+        compressor_ckpt = torch.load(path)
+        # List of module names to load
+        module_names = [
+            "char_pooling_module.out",
+            "token_pooling_module.out",
+            "char_post_adaptor",
+            "token_post_adaptor",
+            "char_pre_transformer",
+            "token_pre_transformer",
+            "token_pooling_module",
+            "char_pooling_module"
+        ]
+        # Load each module
+        for module_name in module_names:
+            self._load_module_state(module_name, compressor_ckpt)
+            
+
     def char_compression(self, x, preds):
         B, T, D = x.size()
         device = x.device
