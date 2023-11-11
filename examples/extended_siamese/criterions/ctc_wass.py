@@ -27,6 +27,8 @@ SAMPLE_LOSS_CHOICES = ChoiceEnum(
     ["sinkhorn", "hausdorff", "energy", "gaussian", "laplacian"]
 )
 
+logger = logging.getLogger(__name__)
+
 
 @dataclass
 class CtcWassersteinCriterionConfig(CtcCriterionConfig):
@@ -53,11 +55,11 @@ class CtcWassersteinCriterionConfig(CtcCriterionConfig):
     ot_loss: SAMPLE_LOSS_CHOICES = field(
         default="sinkhorn",
         metadata={"help": "type of distance measure between X_i and Y_j"},
-    ) # TODO change this to energy
+    )
     ot_p: int = field(
         default=2,
         metadata={"help": "p in SampleLoss"},
-    ) # TODO change this to 1
+    )
     ot_blur: float = field(
         default=0.05,
         metadata={"help": "blur in SampleLoss"},
@@ -128,12 +130,12 @@ class CtcWassersteinCriterion(CtcCriterion):
         else:
             self.save = False
 
-        logging.info(f"*** Loss function ***")
-        logging.info(f"ctc_weight = {self.ctc_weight}")
-        logging.info(f"ctc_sep_weight = {self.ctc_sep_weight}")
-        logging.info(f"ot_weight = {self.ot_weight}")
-        logging.info(f"ot_pos_weight = {self.ot_pos_weight}")
-        logging.info(f"aux_weights = {self.ot_aux_weights}")
+        logger.info(f"*** Loss function ***")
+        logger.info(f"ctc_weight = {self.ctc_weight}")
+        logger.info(f"ctc_sep_weight = {self.ctc_sep_weight}")
+        logger.info(f"ot_weight = {self.ot_weight}")
+        logger.info(f"ot_pos_weight = {self.ot_pos_weight}")
+        logger.info(f"aux_weights = {self.ot_aux_weights}")
 
         self.ot_loss = SamplesLoss(
             loss=cfg.ot_loss, p=self.ot_p, blur=self.ot_blur, scaling=self.ot_scaling
@@ -445,7 +447,12 @@ class CtcWassersteinCriterion(CtcCriterion):
         # zero weights for padding
         speech_weights.masked_fill_(speech_padding_mask, 0.0)
         text_weights.masked_fill_(text_padding_mask, 0.0)
-            
+        
+        is_nan = torch.isnan(speech_out).any(dim=1)
+        if is_nan.any():
+            logger.warning(f"speech_out has NaNs: {is_nan.sum()} / {is_nan.size(0)}")
+            speech_out[is_nan.unsqueeze(1).expand_as(speech_out)] = 0.0
+
         with torch.cuda.amp.autocast(enabled=False):
             wass_loss = self.ot_loss(
                 speech_weights.float(),
@@ -453,7 +460,6 @@ class CtcWassersteinCriterion(CtcCriterion):
                 text_weights.float(),
                 text_out.float().transpose(0, 1).contiguous()
             )
-        
         return wass_loss
 
     @staticmethod
