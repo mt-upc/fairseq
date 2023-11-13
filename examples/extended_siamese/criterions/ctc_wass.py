@@ -250,6 +250,19 @@ class CtcWassersteinCriterion(CtcCriterion):
                 logging_output["token_compression_rate"] = utils.item(
                     encoder_out[0]["token_compression_rate"].data.sum()
                 )
+            if "empty_examples" in encoder_out[0]:
+                logging_output["empty_examples"] = utils.item(
+                    encoder_out[0]["empty_examples"].data.sum()
+                )
+            if "examples_without_ending_sep" in encoder_out[0]:
+                logging_output["examples_without_ending_sep"] = utils.item(
+                    encoder_out[0]["examples_without_ending_sep"].data.sum()
+                )
+                
+        if "num_sep" in extra:
+            logging_output["num_sep"] = utils.item(extra["num_sep"].data)
+        if "num_blank" in extra:
+            logging_output["num_blank"] = utils.item(extra["num_blank"].data)
         
         if self.calculate_ot:
             logging_output["speech_text_len_abs_err"] = utils.item(
@@ -281,6 +294,11 @@ class CtcWassersteinCriterion(CtcCriterion):
         pad_mask = (targets != self.blank_idx) & (targets != self.eos_idx)
         targets_flat = targets.masked_select(pad_mask)
         target_lengths = pad_mask.sum(-1)
+        
+        extra["num_sep"] = (targets_flat == self.sep_idx).sum()
+        extra["num_blank"] = torch.tensor(0, dtype=torch.long, device=targets_flat.device)
+        for i in range(lprobs.size(1)):
+            extra["num_blank"] += (targets[i, :target_lengths[i]] == self.blank_idx).sum()
         
         if self.ctc_weight:
             with torch.backends.cudnn.flags(enabled=False):
@@ -528,6 +546,22 @@ class CtcWassersteinCriterion(CtcCriterion):
             sum(log.get("token_compression_rate", 0) for log in logging_outputs)
         )
         metrics.log_scalar("token_compression_rate", token_compression_rate / nsentences, round=3)
+        empty_examples = utils.item(
+            sum(log.get("empty_examples", 0) for log in logging_outputs)
+        )
+        metrics.log_scalar("empty_examples", empty_examples / nsentences, round=3)
+        examples_without_ending_sep = utils.item(
+            sum(log.get("examples_without_ending_sep", 0) for log in logging_outputs)
+        )
+        metrics.log_scalar("examples_without_ending_sep", examples_without_ending_sep / nsentences, round=3)
+        num_sep = utils.item(
+            sum(log.get("num_sep", 0) for log in logging_outputs)
+        )
+        metrics.log_scalar("num_sep", num_sep / nsentences, round=3)
+        num_blank = utils.item(
+            sum(log.get("num_blank", 0) for log in logging_outputs)
+        )
+        metrics.log_scalar("num_blank", num_blank / nsentences, round=3)
         metrics.log_scalar("ntokens", ntokens)
         metrics.log_scalar("nsentences", nsentences)
         

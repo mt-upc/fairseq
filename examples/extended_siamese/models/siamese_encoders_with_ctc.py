@@ -465,17 +465,19 @@ class SiameseSpeechTextEncoders(FairseqEncoder):
         lens = speech_out["encoder_out_lengths"][0]  # B
         
         prev_lens = lens
-        x, mask, lens, preds = self.compressor.char_compression(x, preds)
+        x, mask, lens, preds, num_empty_examples = self.compressor.char_compression(x, preds)
         
         speech_out["char_compression_rate"] = prev_lens.float() / lens.float()
         speech_out["compression_rate"] = speech_out["char_compression_rate"]
+        speech_out["empty_examples"] = num_empty_examples.float()
 
         if self.compressor.cfg.token_compression is not None:
             prev_lens = lens
-            x, mask, lens = self.compressor.token_compression(x, prev_lens, preds)
+            x, mask, lens, num_examples_without_ending_sep = self.compressor.token_compression(x, prev_lens, preds)
             
             speech_out["token_compression_rate"] = prev_lens.float() / lens.float()
             speech_out["compression_rate"] = speech_out["token_compression_rate"] * speech_out["char_compression_rate"]
+            speech_out["examples_without_ending_sep"] = num_examples_without_ending_sep.float()
             
         speech_out["modified_out"] = [x]
         speech_out["modified_out_lengths"] = [lens]

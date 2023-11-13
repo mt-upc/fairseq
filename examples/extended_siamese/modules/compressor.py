@@ -320,7 +320,9 @@ class Compressor(nn.Module):
         
         # account for empty examples (just a sep token)
         empty_examples = lens == 0
-        if empty_examples.any():
+        num_empty_examples = empty_examples.sum()
+        if num_empty_examples > 0:
+            logger.warning(f"Found {num_empty_examples} empty examples")
             mask[empty_examples, 0] = True
             lens[empty_examples] = 1
             preds[empty_examples, 0] = self.sep_idx
@@ -329,7 +331,7 @@ class Compressor(nn.Module):
         if self.char_post_adaptor is not None:
             x = self.char_post_adaptor(x)
         
-        return x, mask, lens, preds
+        return x, mask, lens, preds, num_empty_examples
     
     def token_compression(self, x, lens, preds):
         # x: B x T x D
@@ -348,11 +350,13 @@ class Compressor(nn.Module):
         x = [x[i, :lens[i]] for i in range(B)]
         
         # make sure every example ends with a separator
+        num_examples_without_ending_sep = torch.tensor(0, device=device, dtype=torch.long)
         for i in range(B):
             if preds[i][-1] != self.sep_idx:
                 preds[i] = torch.cat([preds[i], torch.tensor([self.sep_idx], device=device, dtype=torch.long)])
                 x[i] = torch.cat([x[i], torch.zeros(1, D, device=device, dtype=dtype)])
                 new_lens[i] += 1
+                num_examples_without_ending_sep += 1
         
         # flatten
         preds = torch.cat(preds)
@@ -387,7 +391,7 @@ class Compressor(nn.Module):
         if self.token_post_adaptor is not None:
             x = self.token_post_adaptor(x)
         
-        return x, mask, new_lens    
+        return x, mask, new_lens, num_examples_without_ending_sep  
 
     def forward(self, **kwargs):
         raise NotImplementedError("Use the compression method instead")
