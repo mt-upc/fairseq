@@ -266,10 +266,19 @@ class Compressor(nn.Module):
             self._load_module_state(module_name, compressor_ckpt)
             
 
-    def char_compression(self, x, preds):
+    def char_compression(self, x, preds, lens):
+        # x: B x T x D
+        # preds: B x T
+        # lens: B
+        
         B, T, D = x.size()
         device = x.device
         dtype = x.dtype
+        
+        # zero-out the padding
+        mask = lengths_to_padding_mask(lens) # B x T
+        x = x.masked_fill(mask.unsqueeze(-1), 0)
+        preds = preds.masked_fill(mask, self.blank_idx)
 
         # add a vector of -1 to know where each example ends after flattening the batch
         preds = torch.cat([-torch.ones(B, 1, device=device, dtype=torch.long), preds], dim=1).view(-1)
@@ -333,10 +342,10 @@ class Compressor(nn.Module):
         
         return x, mask, lens, preds, num_empty_examples
     
-    def token_compression(self, x, lens, preds):
+    def token_compression(self, x, preds, lens):
         # x: B x T x D
-        # lens: B
         # preds: B x T
+        # lens: B
         
         B, T, D = x.size()
         device = x.device
