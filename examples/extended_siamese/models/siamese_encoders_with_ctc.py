@@ -451,7 +451,7 @@ class SiameseSpeechTextEncoders(FairseqEncoder):
         
         return speech_out
     
-    def forward_compressor(self, decoder_out, speech_out):
+    def forward_compressor(self, speech_out, decoder_out):
         
         if not _hasattr(self, "compressor"):
             return speech_out
@@ -460,6 +460,7 @@ class SiameseSpeechTextEncoders(FairseqEncoder):
             lprobs_ctc = F.log_softmax(decoder_out[0], dim=-1)  # T x B x V
             preds = torch.argmax(lprobs_ctc, dim=-1)  # T x B
             preds = preds.transpose(0, 1)  # B x T
+            decoder_out[1]["preds"] = preds
             
         x = speech_out["encoder_out"][0]  # B x T x C
         lens = speech_out["encoder_out_lengths"][0]  # B
@@ -483,7 +484,7 @@ class SiameseSpeechTextEncoders(FairseqEncoder):
         speech_out["modified_out_lengths"] = [lens]
         speech_out["modified_padding_mask"] = [mask]
         
-        return speech_out
+        return speech_out, decoder_out
     
     def forward_text(self, src_txt_tokens, src_txt_lengths):
         if not _hasattr(self, "text_encoder"):
@@ -663,7 +664,7 @@ class SiameseEncodersWithCTC(FairseqEncoderDecoderModel):
         if isinstance(self.decoder, CTCDecoder):
             decoder_out = self.decoder(speech_out)
 
-            speech_out = self.encoder.forward_compressor(decoder_out, speech_out)
+            speech_out, decoder_out = self.encoder.forward_compressor(speech_out, decoder_out)
 
         speech_out = self.encoder.forward_adaptor(speech_out)
         

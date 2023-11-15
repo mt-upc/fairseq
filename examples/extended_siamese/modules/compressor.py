@@ -353,6 +353,7 @@ class Compressor(nn.Module):
         num_examples_without_ending_sep = torch.tensor(0, device=device, dtype=torch.long)
         for i in range(B):
             if preds[i][-1] != self.sep_idx:
+                logger.warning(f"Example with length {lens[i]} and new length {new_lens[i]} ending with {preds[i][-1]}")
                 preds[i] = torch.cat([preds[i], torch.tensor([self.sep_idx], device=device, dtype=torch.long)])
                 x[i] = torch.cat([x[i], torch.zeros(1, D, device=device, dtype=dtype)])
                 new_lens[i] += 1
