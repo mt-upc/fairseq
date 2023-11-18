@@ -48,7 +48,7 @@ class CTCDecoder(FairseqDecoder):
 
         self.cfg = cfg
         self.dictionary = dictionary
-        self.blank_idx = dictionary.pad()  # TODO have to check for other encoders.
+        self.blank_idx = dictionary.pad()
         self.sep_token = "|"
         self.sep_idx = dictionary.symbols.index(self.sep_token)
 

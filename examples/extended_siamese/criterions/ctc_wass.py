@@ -325,8 +325,7 @@ class CtcWassersteinCriterion(CtcCriterion):
         extra["ctc_sep_loss"] = 0
         ctc_sep_loss_per_example = None
         if self.ctc_sep_weight > 0.0:
-            targets_flat_sep = targets_flat.clone()
-            targets_flat_sep[targets_flat_sep != self.sep_idx] = self.unk_idx
+            targets_flat[targets_flat != self.sep_idx] = self.unk_idx
             
             # Create a mask to separate indices to combine
             combine_mask = torch.ones(lprobs.size(2), dtype=bool, device=lprobs.device)
@@ -339,7 +338,7 @@ class CtcWassersteinCriterion(CtcCriterion):
             with torch.backends.cudnn.flags(enabled=False):
                 ctc_sep_loss_per_example = F.ctc_loss(
                     lprobs_sep,
-                    targets_flat_sep,
+                    targets_flat,
                     input_lengths,
                     target_lengths,
                     blank=self.blank_idx,
