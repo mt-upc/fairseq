@@ -106,7 +106,7 @@ class CLSPooling(nn.Module):
         self.transformer = TransformerEncoderLayers(embed_dim, num_transformer_layers, dropout_rate)
         
         if use_positional:
-            self.pos_emb = PositionalEmbedding(512, embed_dim, 0)
+            self.pos_emb = PositionalEmbedding(512, embed_dim, 1)
             self.scale = math.sqrt(embed_dim)
 
     def forward(self, x, lens):
