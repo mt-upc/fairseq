@@ -2,6 +2,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Optional
 from omegaconf import II
+import math
 
 import torch
 import torch.nn as nn
@@ -12,7 +13,7 @@ from fairseq.data.data_utils import lengths_to_padding_mask
 from fairseq.dataclass import FairseqDataclass
 from fairseq.dataclass.constants import ChoiceEnum
 from fairseq.models.transformer.transformer_config import TransformerConfig
-from fairseq.modules import FairseqDropout, LayerNorm
+from fairseq.modules import FairseqDropout, LayerNorm, PositionalEmbedding
 from fairseq.modules.transformer_layer import TransformerEncoderLayerBase
 
 logger = logging.getLogger(__name__)
@@ -97,13 +98,17 @@ class BasicPooling(nn.Module):
         return x
     
 class CLSPooling(nn.Module):
-    def __init__(self, embed_dim, num_transformer_layers=1, dropout_rate=0.0):
+    def __init__(self, embed_dim, num_transformer_layers=1, dropout_rate=0.0, use_positional=False):
         super().__init__()
         self.cls_token = nn.Parameter(torch.empty(1, 1, embed_dim))
         nn.init.normal_(self.cls_token, mean=0.0, std=0.25) # to match the norm of x
         
         self.transformer = TransformerEncoderLayers(embed_dim, num_transformer_layers, dropout_rate)
         
+        if use_positional:
+            self.pos_emb = PositionalEmbedding(512, embed_dim, 0)
+            self.scale = math.sqrt(embed_dim)
+
     def forward(self, x, lens):
         # x: [B, N, D]
         # mask: [B, N]
@@ -117,6 +122,9 @@ class CLSPooling(nn.Module):
         dim=1) # [B, N+1, D]
         
         mask = lengths_to_padding_mask(lens+1)
+        
+        if hasattr(self, "pos_emb"):
+            x = x + self.pos_emb(mask.long()) / self.scale
         
         x = self.transformer(x, mask) # [B, N+1, D]
         x = x[:, 0] # [B, D]
@@ -181,6 +189,9 @@ class LevelCompressorConfig(FairseqDataclass):
     output_layer: bool = field(
         default=False, metadata={"help": "whether to use a linear layer after pooling"}
     )
+    use_positional_embedding: bool = field(
+        default=False, metadata={"help": "use positional embedding in the CLS pooling transformer"}
+    )
 
 
 @dataclass
@@ -197,6 +208,9 @@ class CompressorConfig(FairseqDataclass):
     path: Optional[str] = field(
         default=None, metadata={"help": "path to load the compressor from"}
     )
+    remove_sep: bool = field(
+        default=False, metadata={"help": "remove separator before pooling"}
+    )
 
 
 class Compressor(nn.Module):
@@ -206,6 +220,10 @@ class Compressor(nn.Module):
         self.embed_dim = cfg.embed_dim
         self.blank_idx = blank_idx
         self.sep_idx = sep_idx
+        
+        self.remove_sep = False
+        if hasattr(self.cfg, "remove_sep") and self.cfg.remove_sep:
+            self.remove_sep = True
 
         assert cfg.char_compression is not None
         self.char_pooling_module, self.char_post_adaptor, self.char_pre_transformer = self._init_modules(cfg.char_compression)
@@ -222,7 +240,7 @@ class Compressor(nn.Module):
             pooling_module = AttentionPooling(self.embed_dim, lvl_cfg.attn_hidden_dim, lvl_cfg.dropout)    
         elif lvl_cfg.pooling_fn == "cls":
             assert lvl_cfg.transformer_layers > 0
-            pooling_module = CLSPooling(self.embed_dim, lvl_cfg.transformer_layers, lvl_cfg.dropout) 
+            pooling_module = CLSPooling(self.embed_dim, lvl_cfg.transformer_layers, lvl_cfg.dropout, lvl_cfg.use_positional_embedding) 
         else: # mean or max or mean-max
             pooling_module = BasicPooling(lvl_cfg.pooling_fn, self.embed_dim, lvl_cfg.output_layer)
 
@@ -379,6 +397,8 @@ class Compressor(nn.Module):
         
         # re-arrange in 3d [total_num_tokens x max(count) x D]
         x = torch.split(x, split_points) # Tuple[2d tensor]
+        if self.remove_sep:
+            x = [x_i[:-1] for x_i in x] # remove sep
         counts = torch.tensor([len(x_i) for x_i in x], device=device, dtype=torch.long)
         x = pad_sequence(x, batch_first=True, padding_value=0)
         
@@ -397,7 +417,7 @@ class Compressor(nn.Module):
         x = pad_sequence(x, batch_first=True, padding_value=0) # B x ? x D
         
         mask = lengths_to_padding_mask(new_lens)
-    
+        
         if self.token_post_adaptor is not None:
             x = self.token_post_adaptor(x)
         

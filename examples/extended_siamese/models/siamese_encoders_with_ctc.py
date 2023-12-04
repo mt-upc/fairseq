@@ -536,9 +536,8 @@ class SiameseSpeechTextEncoders(FairseqEncoder):
     def _maybe_freeze_speech_embedder(self):
         if _hasattr(self, "speech_embedder") and self.cfg.speech_embedder.freeze:
             logger.info("Freezing speech embedder ...")
-            for n, p in self.speech_embedder.named_parameters():
-                logger.info(f"- freezing {n}")
-                p.requires_grad = False
+            self.speech_embedder.bos_emb.requires_grad = False
+            self.speech_embedder.eos_emb.requires_grad = False
 
 @register_model("siamese_encoders_with_ctc", dataclass=SiameseConfig)
 class SiameseEncodersWithCTC(FairseqEncoderDecoderModel):
