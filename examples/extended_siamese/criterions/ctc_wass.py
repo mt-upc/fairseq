@@ -267,6 +267,8 @@ class CtcWassersteinCriterion(CtcCriterion):
             logging_output["inf_ctc_loss"] = utils.item(extra["inf_ctc_loss"].data)
         if "inf_sep_loss" in extra:
             logging_output["inf_sep_loss"] = utils.item(extra["inf_sep_loss"].data)
+            
+        logging_output["emb_scale"] = utils.item(model.encoder.speech_embedder.scale.data)
         
         if self.calculate_ot:
             logging_output["speech_text_len_abs_err"] = utils.item(
@@ -565,6 +567,11 @@ class CtcWassersteinCriterion(CtcCriterion):
         num_unk = utils.item(
             sum(log.get("num_unk", 0) for log in logging_outputs)
         )
+        # just get the last one logged
+        emb_scale = utils.item(
+            logging_outputs[-1].get("emb_scale", 0)
+        )
+        metrics.log_scalar("emb_scale", emb_scale, round=3)
         metrics.log_scalar("num_unk", num_unk / nsentences, round=3)
         inf_ctc_loss = utils.item(
             sum(log.get("inf_ctc_loss", 0) for log in logging_outputs)
@@ -576,7 +583,6 @@ class CtcWassersteinCriterion(CtcCriterion):
         metrics.log_scalar("inf_sep_loss", inf_sep_loss / nsentences, round=3)
         metrics.log_scalar("ntokens", ntokens)
         metrics.log_scalar("nsentences", nsentences)
-        
         if "wer" in logging_outputs[0]:
             c_errors = sum(log.get("c_errors", 0) for log in logging_outputs)
             metrics.log_scalar("_c_errors", c_errors)

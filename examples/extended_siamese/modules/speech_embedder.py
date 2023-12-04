@@ -64,9 +64,9 @@ class SpeechEmbedder(nn.Module):
             if cfg.learned_positional_embedding:
                 self.embedding_layernorm = LayerNorm(cfg.embed_dim)
         if cfg.scale_embedding and cfg.learned_scale:
-            self.scale = nn.Parameter(torch.tensor([1.0]))
+            self.scale = nn.Parameter(torch.tensor([10.0]))
         elif cfg.scale_embedding:
-            self.scale = math.sqrt(cfg.embed_dim)
+            self.scale = 10.0
         else:
             self.scale = 1.0
         
