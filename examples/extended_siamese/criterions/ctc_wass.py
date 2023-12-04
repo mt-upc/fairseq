@@ -571,7 +571,7 @@ class CtcWassersteinCriterion(CtcCriterion):
         emb_scale = utils.item(
             sum(log.get("emb_scale", 0) for log in logging_outputs)
         )
-        metrics.log_scalar("emb_scale", emb_scale / nsentences, round=3)
+        metrics.log_scalar("emb_scale", emb_scale / len(logging_outputs), round=3)
         inf_ctc_loss = utils.item(
             sum(log.get("inf_ctc_loss", 0) for log in logging_outputs)
         )
