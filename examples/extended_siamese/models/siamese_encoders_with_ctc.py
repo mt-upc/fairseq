@@ -527,9 +527,15 @@ class SiameseSpeechTextEncoders(FairseqEncoder):
                     layer.dropout3.p = 0.0
                     
     def _maybe_freeze_context_encoder(self):
+        finetune_ln = _hasattr(self.cfg.context_encoder, "finetune_ln_layers") and self.cfg.context_encoder.finetune_ln_layers
         if _hasattr(self, "context_encoder") and self.cfg.context_encoder.freeze:
-            logger.info(f"Freezing context encoder ...")
+            if finetune_ln:
+                logger.info(f"Freezing context encoder BUT no the LN layers ...")
+            else:
+                logger.info(f"Freezing context encoder ...")
             for n, p in self.context_encoder.named_parameters():
+                if finetune_ln and "layer_norm" in n:
+                    continue
                 logger.info(f"- freezing {n}")
                 p.requires_grad = False
         
