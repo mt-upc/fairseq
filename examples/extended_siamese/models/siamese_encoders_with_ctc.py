@@ -454,7 +454,7 @@ class SiameseSpeechTextEncoders(FairseqEncoder):
     def forward_compressor(self, speech_out, decoder_out):
         
         if not _hasattr(self, "compressor"):
-            return speech_out
+            return speech_out, decoder_out
         
         with torch.no_grad():
             lprobs_ctc = F.log_softmax(decoder_out[0], dim=-1)  # T x B x V
@@ -471,6 +471,7 @@ class SiameseSpeechTextEncoders(FairseqEncoder):
         speech_out["char_compression_rate"] = prev_lens.float() / lens.float()
         speech_out["compression_rate"] = speech_out["char_compression_rate"]
         speech_out["empty_examples"] = num_empty_examples.float()
+        speech_out["compressed_preds"] = preds
 
         if self.compressor.cfg.token_compression is not None:
             prev_lens = lens
