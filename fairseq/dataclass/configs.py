@@ -101,6 +101,12 @@ class CommonConfig(FairseqDataclass):
     no_progress_bar: bool = field(
         default=False, metadata={"help": "disable progress bar"}
     )
+    log_grad_norms: bool = field(
+        default=False, metadata={"help": "log gradients norm and parameter norm"}
+    )
+    log_param_norms: bool = field(
+        default=False, metadata={"help": "log parameter norm"}
+    )
     log_interval: int = field(
         default=100,
         metadata={
