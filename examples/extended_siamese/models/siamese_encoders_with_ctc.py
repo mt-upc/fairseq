@@ -451,37 +451,41 @@ class SiameseSpeechTextEncoders(FairseqEncoder):
         
         return speech_out
     
-    def forward_compressor(self, decoder_out, speech_out):
+    def forward_compressor(self, speech_out, decoder_out):
         
         if not _hasattr(self, "compressor"):
-            return speech_out
+            return speech_out, decoder_out
         
         with torch.no_grad():
             lprobs_ctc = F.log_softmax(decoder_out[0], dim=-1)  # T x B x V
             preds = torch.argmax(lprobs_ctc, dim=-1)  # T x B
             preds = preds.transpose(0, 1)  # B x T
+            decoder_out[1]["preds"] = preds
             
         x = speech_out["encoder_out"][0]  # B x T x C
         lens = speech_out["encoder_out_lengths"][0]  # B
         
         prev_lens = lens
-        x, mask, lens, preds = self.compressor.char_compression(x, preds)
+        x, mask, lens, preds, num_empty_examples = self.compressor.char_compression(x, preds, lens)
         
         speech_out["char_compression_rate"] = prev_lens.float() / lens.float()
         speech_out["compression_rate"] = speech_out["char_compression_rate"]
+        speech_out["empty_examples"] = num_empty_examples.float()
+        speech_out["compressed_preds"] = preds
 
         if self.compressor.cfg.token_compression is not None:
             prev_lens = lens
-            x, mask, lens = self.compressor.token_compression(x, prev_lens, preds)
+            x, mask, lens, num_examples_without_ending_sep = self.compressor.token_compression(x, preds, lens)
             
             speech_out["token_compression_rate"] = prev_lens.float() / lens.float()
             speech_out["compression_rate"] = speech_out["token_compression_rate"] * speech_out["char_compression_rate"]
+            speech_out["examples_without_ending_sep"] = num_examples_without_ending_sep.float()
             
         speech_out["modified_out"] = [x]
         speech_out["modified_out_lengths"] = [lens]
         speech_out["modified_padding_mask"] = [mask]
         
-        return speech_out
+        return speech_out, decoder_out
     
     def forward_text(self, src_txt_tokens, src_txt_lengths):
         if not _hasattr(self, "text_encoder"):
@@ -524,18 +528,23 @@ class SiameseSpeechTextEncoders(FairseqEncoder):
                     layer.dropout3.p = 0.0
                     
     def _maybe_freeze_context_encoder(self):
+        finetune_ln = _hasattr(self.cfg.context_encoder, "finetune_ln_layers") and self.cfg.context_encoder.finetune_ln_layers
         if _hasattr(self, "context_encoder") and self.cfg.context_encoder.freeze:
-            logger.info(f"Freezing context encoder ...")
+            if finetune_ln:
+                logger.info(f"Freezing context encoder BUT no the LN layers ...")
+            else:
+                logger.info(f"Freezing context encoder ...")
             for n, p in self.context_encoder.named_parameters():
+                if finetune_ln and "layer_norm" in n:
+                    continue
                 logger.info(f"- freezing {n}")
                 p.requires_grad = False
         
     def _maybe_freeze_speech_embedder(self):
         if _hasattr(self, "speech_embedder") and self.cfg.speech_embedder.freeze:
             logger.info("Freezing speech embedder ...")
-            for n, p in self.speech_embedder.named_parameters():
-                logger.info(f"- freezing {n}")
-                p.requires_grad = False
+            self.speech_embedder.bos_emb.requires_grad = False
+            self.speech_embedder.eos_emb.requires_grad = False
 
 @register_model("siamese_encoders_with_ctc", dataclass=SiameseConfig)
 class SiameseEncodersWithCTC(FairseqEncoderDecoderModel):
@@ -661,7 +670,7 @@ class SiameseEncodersWithCTC(FairseqEncoderDecoderModel):
         if isinstance(self.decoder, CTCDecoder):
             decoder_out = self.decoder(speech_out)
 
-            speech_out = self.encoder.forward_compressor(decoder_out, speech_out)
+            speech_out, decoder_out = self.encoder.forward_compressor(speech_out, decoder_out)
 
         speech_out = self.encoder.forward_adaptor(speech_out)
         

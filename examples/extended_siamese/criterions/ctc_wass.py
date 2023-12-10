@@ -27,6 +27,8 @@ SAMPLE_LOSS_CHOICES = ChoiceEnum(
     ["sinkhorn", "hausdorff", "energy", "gaussian", "laplacian"]
 )
 
+logger = logging.getLogger(__name__)
+
 
 @dataclass
 class CtcWassersteinCriterionConfig(CtcCriterionConfig):
@@ -53,11 +55,11 @@ class CtcWassersteinCriterionConfig(CtcCriterionConfig):
     ot_loss: SAMPLE_LOSS_CHOICES = field(
         default="sinkhorn",
         metadata={"help": "type of distance measure between X_i and Y_j"},
-    ) # TODO change this to energy
+    )
     ot_p: int = field(
         default=2,
         metadata={"help": "p in SampleLoss"},
-    ) # TODO change this to 1
+    )
     ot_blur: float = field(
         default=0.05,
         metadata={"help": "blur in SampleLoss"},
@@ -128,12 +130,12 @@ class CtcWassersteinCriterion(CtcCriterion):
         else:
             self.save = False
 
-        logging.info(f"*** Loss function ***")
-        logging.info(f"ctc_weight = {self.ctc_weight}")
-        logging.info(f"ctc_sep_weight = {self.ctc_sep_weight}")
-        logging.info(f"ot_weight = {self.ot_weight}")
-        logging.info(f"ot_pos_weight = {self.ot_pos_weight}")
-        logging.info(f"aux_weights = {self.ot_aux_weights}")
+        logger.info(f"*** Loss function ***")
+        logger.info(f"ctc_weight = {self.ctc_weight}")
+        logger.info(f"ctc_sep_weight = {self.ctc_sep_weight}")
+        logger.info(f"ot_weight = {self.ot_weight}")
+        logger.info(f"ot_pos_weight = {self.ot_pos_weight}")
+        logger.info(f"aux_weights = {self.ot_aux_weights}")
 
         self.ot_loss = SamplesLoss(
             loss=cfg.ot_loss, p=self.ot_p, blur=self.ot_blur, scaling=self.ot_scaling
@@ -248,11 +250,32 @@ class CtcWassersteinCriterion(CtcCriterion):
                 logging_output["token_compression_rate"] = utils.item(
                     encoder_out[0]["token_compression_rate"].data.sum()
                 )
+            if "empty_examples" in encoder_out[0]:
+                logging_output["empty_examples"] = utils.item(
+                    encoder_out[0]["empty_examples"].data.sum()
+                )
+            if "examples_without_ending_sep" in encoder_out[0]:
+                logging_output["examples_without_ending_sep"] = utils.item(
+                    encoder_out[0]["examples_without_ending_sep"].data.sum()
+                )
+                
+        if "num_sep" in extra:
+            logging_output["num_sep"] = utils.item(extra["num_sep"].data)
+        if "num_unk" in extra:
+            logging_output["num_unk"] = utils.item(extra["num_unk"].data)
+        if "num_sep_" in extra:
+            logging_output["num_sep_"] = utils.item(extra["num_sep_"].data)
+        if "num_unk_" in extra:
+            logging_output["num_unk_"] = utils.item(extra["num_unk_"].data)
+        if "inf_ctc_loss" in extra:
+            logging_output["inf_ctc_loss"] = utils.item(extra["inf_ctc_loss"].data)
+        if "inf_sep_loss" in extra:
+            logging_output["inf_sep_loss"] = utils.item(extra["inf_sep_loss"].data)
+        
+        if hasattr(model.encoder.speech_embedder, "scale") and not isinstance(model.encoder.speech_embedder.scale, float):
+            logging_output["emb_scale"] = utils.item(model.encoder.speech_embedder.scale.data)
         
         if self.calculate_ot:
-            logging_output["speech_text_len_ratio"] = utils.item(
-                (speech_lens[:B].float() / text_lens[:B].float()).data.sum()
-            )
             logging_output["speech_text_len_abs_err"] = utils.item(
                 (speech_lens[:B].float() - text_lens[:B].float()).abs().data.sum()
             )
@@ -283,6 +306,13 @@ class CtcWassersteinCriterion(CtcCriterion):
         targets_flat = targets.masked_select(pad_mask)
         target_lengths = pad_mask.sum(-1)
         
+        if "preds" in net_output[1]:
+            extra["num_sep"] = (net_output[1]["preds"] == self.sep_idx).sum()
+            extra["num_unk"] = (net_output[1]["preds"] == self.unk_idx).sum()
+        if "compressed_preds" in encoder_out[0]:
+            extra["num_sep_"] = (encoder_out[0]["compressed_preds"] == self.sep_idx).sum()
+            extra["num_unk_"] = (encoder_out[0]["compressed_preds"] == self.unk_idx).sum()
+            
         if self.ctc_weight:
             with torch.backends.cudnn.flags(enabled=False):
                 ctc_loss_per_example = F.ctc_loss(
@@ -297,6 +327,7 @@ class CtcWassersteinCriterion(CtcCriterion):
             
             ctc_loss = ctc_loss_per_example.sum()
             extra["ctc_loss"] = ctc_loss
+            extra["inf_ctc_loss"] = (ctc_loss_per_example == 0.0).sum()
         
         if self.eval_wer:
             extra["lprobs_ctc"] = lprobs
@@ -329,6 +360,7 @@ class CtcWassersteinCriterion(CtcCriterion):
             
             ctc_sep_loss = ctc_sep_loss_per_example.sum()
             extra["ctc_sep_loss"] = ctc_sep_loss
+            extra["inf_sep_loss"] = (ctc_sep_loss_per_example == 0.0).sum()
 
         return ctc_loss, extra, lprobs.exp(), ctc_loss_per_example, ctc_sep_loss_per_example
     
@@ -448,7 +480,12 @@ class CtcWassersteinCriterion(CtcCriterion):
         # zero weights for padding
         speech_weights.masked_fill_(speech_padding_mask, 0.0)
         text_weights.masked_fill_(text_padding_mask, 0.0)
-            
+        
+        is_nan = torch.isnan(speech_out).any(dim=1)
+        if is_nan.any():
+            logger.warning(f"speech_out has NaNs: {is_nan.sum()} / {is_nan.size(0)}")
+            speech_out[is_nan.unsqueeze(1).expand_as(speech_out)] = 0.0
+
         with torch.cuda.amp.autocast(enabled=False):
             wass_loss = self.ot_loss(
                 speech_weights.float(),
@@ -456,7 +493,6 @@ class CtcWassersteinCriterion(CtcCriterion):
                 text_weights.float(),
                 text_out.float().transpose(0, 1).contiguous()
             )
-        
         return wass_loss
 
     @staticmethod
@@ -508,17 +544,11 @@ class CtcWassersteinCriterion(CtcCriterion):
                         sample_size,
                         round=3,
                     )   
-        
-        speech_text_len_ratio = utils.item(
-            sum(log.get("speech_text_len_ratio", 0) for log in logging_outputs)
-        ) / nsentences
-        metrics.log_scalar("speech_text_len_ratio", speech_text_len_ratio, round=3)
+
         speech_text_len_abs_err = utils.item(
             sum(log.get("speech_text_len_abs_err", 0) for log in logging_outputs)
         ) / nsentences
         metrics.log_scalar("speech_text_len_abs_err", speech_text_len_abs_err, round=3)
-
-
         compression_rate = utils.item(
             sum(log.get("compression_rate", 0) for log in logging_outputs)
         )
@@ -531,10 +561,45 @@ class CtcWassersteinCriterion(CtcCriterion):
             sum(log.get("token_compression_rate", 0) for log in logging_outputs)
         )
         metrics.log_scalar("token_compression_rate", token_compression_rate / nsentences, round=3)
-
+        empty_examples = utils.item(
+            sum(log.get("empty_examples", 0) for log in logging_outputs)
+        )
+        metrics.log_scalar("empty_examples", empty_examples / nsentences, round=3)
+        examples_without_ending_sep = utils.item(
+            sum(log.get("examples_without_ending_sep", 0) for log in logging_outputs)
+        )
+        metrics.log_scalar("examples_without_ending_sep", examples_without_ending_sep / nsentences, round=3)
+        num_sep = utils.item(
+            sum(log.get("num_sep", 0) for log in logging_outputs)
+        )
+        metrics.log_scalar("num_sep", num_sep / nsentences, round=3)
+        num_unk = utils.item(
+            sum(log.get("num_unk", 0) for log in logging_outputs)
+        )
+        metrics.log_scalar("num_unk", num_unk / nsentences, round=3)
+        
+        num_sep_ = utils.item(
+            sum(log.get("num_sep_", 0) for log in logging_outputs)
+        )
+        metrics.log_scalar("num_sep_", num_sep_ / nsentences, round=3)
+        num_unk_ = utils.item(
+            sum(log.get("num_unk_", 0) for log in logging_outputs)
+        )
+        metrics.log_scalar("num_unk_", num_unk_ / nsentences, round=3)
+        emb_scale = utils.item(
+            sum(log.get("emb_scale", 0) for log in logging_outputs)
+        )
+        metrics.log_scalar("emb_scale", emb_scale / len(logging_outputs), round=3)
+        inf_ctc_loss = utils.item(
+            sum(log.get("inf_ctc_loss", 0) for log in logging_outputs)
+        )
+        metrics.log_scalar("inf_ctc_loss", inf_ctc_loss / nsentences, round=3)
+        inf_sep_loss = utils.item(
+            sum(log.get("inf_sep_loss", 0) for log in logging_outputs)
+        )
+        metrics.log_scalar("inf_sep_loss", inf_sep_loss / nsentences, round=3)
         metrics.log_scalar("ntokens", ntokens)
         metrics.log_scalar("nsentences", nsentences)
-        
         if "wer" in logging_outputs[0]:
             c_errors = sum(log.get("c_errors", 0) for log in logging_outputs)
             metrics.log_scalar("_c_errors", c_errors)

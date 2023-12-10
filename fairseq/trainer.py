@@ -32,6 +32,18 @@ from fairseq.utils import safe_hasattr
 
 logger = logging.getLogger(__name__)
 
+@torch.no_grad()
+def get_norms(model, log="grad", norm_type=2, exclude=None):
+    norms = {}
+    if exclude is None:
+        exclude = []
+    for name, param in model.named_parameters():
+        if param.grad is not None and not any(e in name for e in exclude):
+            if log == "grad":
+                norms[name] = torch.norm(param.grad.data, norm_type).item()
+            elif log == "param":
+                norms[name] = torch.norm(param.data, norm_type).item()
+    return norms
 
 class Trainer(object):
     """Main class for data parallel training.
@@ -1113,6 +1125,38 @@ class Trainer(object):
                 round=4,
                 weight=0,
             )
+            
+        if hasattr(self.cfg.common, "log_grad_norms")  and self.cfg.common.log_grad_norms:
+            grad_norms = get_norms(self.model, log="grad", exclude=["bias"])
+            if self._num_updates % self.cfg.common.log_interval == 0:
+                for param_name, norm in sorted(
+                    grad_norms.items(), key=lambda x: x[1], reverse=True
+                )[:30]:
+                    logging.info(f"grad_norm {param_name}: {round(norm, 4)}")
+            for param_name, norm in grad_norms.items():
+                metrics.log_scalar(
+                    f"grad_norms/{param_name}",
+                    norm,
+                    priority=700,
+                    round=4,
+                    weight=0,
+                )
+                
+        if hasattr(self.cfg.common, "log_param_norms")  and self.cfg.common.log_param_norms:
+            param_norms = get_norms(self.model, log="param", exclude=["bias"])
+            if self._num_updates % self.cfg.common.log_interval == 0:
+                for param_name, norm in sorted(
+                    param_norms.items(), key=lambda x: x[1], reverse=True
+                )[:30]:
+                    logging.info(f"param_norm {param_name}: {round(norm, 4)}")
+            for param_name, norm in param_norms.items():
+                metrics.log_scalar(
+                    f"param_norms/{param_name}",
+                    norm,
+                    priority=700,
+                    round=4,
+                    weight=0,
+                )
 
         metrics.log_stop_time("train_wall")
         return logging_output

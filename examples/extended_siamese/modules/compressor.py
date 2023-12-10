@@ -2,6 +2,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Optional
 from omegaconf import II
+import math
 
 import torch
 import torch.nn as nn
@@ -12,7 +13,7 @@ from fairseq.data.data_utils import lengths_to_padding_mask
 from fairseq.dataclass import FairseqDataclass
 from fairseq.dataclass.constants import ChoiceEnum
 from fairseq.models.transformer.transformer_config import TransformerConfig
-from fairseq.modules import FairseqDropout, LayerNorm
+from fairseq.modules import FairseqDropout, LayerNorm, PositionalEmbedding
 from fairseq.modules.transformer_layer import TransformerEncoderLayerBase
 
 logger = logging.getLogger(__name__)
@@ -47,7 +48,7 @@ class TransformerEncoderLayers(nn.Module):
         cfg.dropout = dropout_rate
         cfg.attention_dropout = dropout_rate
         cfg.activation_dropout = dropout_rate
-        cfg.encoder.attention_heads = 16 if embed_dim == 1024 else 8
+        cfg.encoder.attention_heads = 16
 
         self.layers = nn.ModuleList(
             [TransformerEncoderLayerBase(cfg) for _ in range(num_layers)]
@@ -68,53 +69,67 @@ class TransformerEncoderLayers(nn.Module):
         return x
 
 class BasicPooling(nn.Module):
-    def __init__(self, pooling_fn: str, embed_dim: int, layernorm=False):
+    def __init__(self, pooling_fn: str, embed_dim: int, output_layer=False):
         super().__init__()
-        self.out = nn.Linear(embed_dim, embed_dim)
+        
         self.pooling_fn = pooling_fn
-        if layernorm:
-            self.layer_norm = LayerNorm(embed_dim)
         
-    def forward(self, x, mask):
+        if self.pooling_fn == "mean-max":
+            assert output_layer
+            self.out = nn.Linear(embed_dim*2, embed_dim)
+        else:
+            if output_layer:
+                self.out = nn.Linear(embed_dim, embed_dim)
+        
+    def forward(self, x, lens):
         # x: [B, N, D]
-        # mask: [B, N]
-        
-        if hasattr(self, "layer_norm"):
-            x = self.layer_norm(x)
+        # lens: [B]
         
         if self.pooling_fn == "mean":
-            lens = (~mask).to(torch.long).sum(dim=1).to(x.dtype) # [B]
-            lens[lens.eq(0.0)] = 1.5  # to avoid division by 0
-            y = torch.sum(x, dim=1) / lens.unsqueeze(1) # [B, D]
+            x = torch.sum(x, dim=1) / lens.to(dtype=x.dtype).unsqueeze(1) # [B, D]
         elif self.pooling_fn == "max":
-            y = torch.max(x, dim=1)[0] # [B, D]
+            x = torch.max(x, dim=1)[0] # [B, D]
+        elif self.pooling_fn == "mean-max":
+            x = torch.cat([torch.sum(x, dim=1) / lens.to(dtype=x.dtype).unsqueeze(1), torch.max(x, dim=1)[0]], dim=-1)
+        
+        if hasattr(self, "out"):
+            x = self.out(x) # [B, D]
             
-        y = self.out(y) # [B, D]
-            
-        return y
+        return x
     
 class CLSPooling(nn.Module):
-    def __init__(self, embed_dim, num_transformer_layers=1, dropout_rate=0.0):
+    def __init__(self, embed_dim, num_transformer_layers=1, dropout_rate=0.0, use_positional=False):
         super().__init__()
-        self.cls_token = torch.empty(1, 1, embed_dim)
-        nn.init.xavier_uniform_(self.cls_token)
+        self.cls_token = nn.Parameter(torch.empty(1, 1, embed_dim))
+        nn.init.normal_(self.cls_token, mean=0.0, std=0.25) # to match the norm of x
         
         self.transformer = TransformerEncoderLayers(embed_dim, num_transformer_layers, dropout_rate)
         
-    def forward(self, x, mask):
+        if use_positional:
+            self.pos_emb = PositionalEmbedding(512, embed_dim, 1)
+            self.scale = math.sqrt(embed_dim)
+
+    def forward(self, x, lens):
         # x: [B, N, D]
         # mask: [B, N]
+
+        # prepend cls token
+        x = torch.cat(
+            [
+                self.cls_token.to(dtype=x.dtype, device=x.device).repeat(x.size(0), 1, 1), # B x 1 x D
+                x
+            ],
+        dim=1) # [B, N+1, D]
         
-        cls_token = self.cls_token.repeat(x.size(0), 1, 1).to(dtype=x.dtype, device=x.device) # [B, 1, D]
-        cls_mask = torch.zeros(x.size(0), 1, dtype=mask.dtype, device=mask.device) # [B, 1]
-        x = torch.cat([cls_token, x], dim=1) # [B, N+1, D]
-        mask = torch.cat([cls_mask, mask], dim=1) # [B, N+1]
+        mask = lengths_to_padding_mask(lens+1)
+        
+        if hasattr(self, "pos_emb"):
+            x = x + self.pos_emb(mask.long()) / self.scale
         
         x = self.transformer(x, mask) # [B, N+1, D]
+        x = x[:, 0] # [B, D]
         
-        y = x[:, 0] # [B, D]
-        
-        return y
+        return x
     
 class AttentionPooling(nn.Module):
     def __init__(self, embed_dim, hidden_dim, dropout_rate):
@@ -122,56 +137,60 @@ class AttentionPooling(nn.Module):
 
         self.attention = nn.Sequential(
             nn.Linear(embed_dim, hidden_dim),
-            nn.ReLU(),
+            nn.GELU(),
             FairseqDropout(dropout_rate),
-            nn.Linear(hidden_dim, 1)
+            nn.Linear(hidden_dim, 1),
         )
 
         self.out = nn.Linear(embed_dim, embed_dim)
         
-    def forward(self, x, mask):
+    def forward(self, x, lens):
         # x: [B, N, D]
-        # mask: [B, N]
+        # lens: [B]
+        
+        mask = lengths_to_padding_mask(lens)
 
         attn_scores = self.attention(x).squeeze(-1) # [B, N]
         attn_scores = attn_scores.masked_fill(mask, float('-inf')) # [B, N]
 
         attn_weights = F.softmax(attn_scores, dim=-1).unsqueeze(-1) # [B, N, 1]
 
-        y = torch.sum(attn_weights * x, dim=1) # [B, D]
-        y = self.out(y) # [B, D]
+        x = torch.sum(attn_weights * x, dim=1) # [B, D]
+        x = self.out(x) # [B, D]
 
-        return y
+        return x
 
 
 @dataclass
 class LevelCompressorConfig(FairseqDataclass):
-    pooling_fn: ChoiceEnum(["mean", "max", "attention", "cls"]) = field(
+    pooling_fn: ChoiceEnum(["mean", "max", "mean-max", "attention", "cls"]) = field(
         default="mean",
         metadata={"help": "pooling function for collapsing representations"},
     )
     attn_hidden_dim: int = field(
-        default=4096,
+        default=8192,
         metadata={"help": "hidden dimension for attention pooling"}
     )
-    cls_transformer_layers: int = field(
-        default=1,
-        metadata={"help": "number of transformer layers if pooling_fn is cls"},
+    transformer_layers: int = field(
+        default=0,
+        metadata={"help": "number of transformer layers if pooling_fn is cls, otherwise separate transformer"},
     )
     post_pooling_adaptor: bool = field(
         default=False, metadata={"help": "whether to use an adaptor after pooling"}
     )
     adaptor_dim: int = field(
-        default=4096,
+        default=8192,
         metadata={"help": "projection dimension for post-pooling adaptor"},
     )
     dropout: float = field(
         default=0.0,
         metadata={"help": "dropout rate for every module in this level compressor"},
     )
-    layernorm: bool = field(
-        default=False,
-        metadata={"help": "whether to use layer normalization before pooling"},
+    output_layer: bool = field(
+        default=False, metadata={"help": "whether to use a linear layer after pooling"}
+    )
+    use_positional_embedding: bool = field(
+        default=False, metadata={"help": "use positional embedding in the CLS pooling transformer"}
     )
 
 
@@ -186,6 +205,12 @@ class CompressorConfig(FairseqDataclass):
     token_compression: Optional[LevelCompressorConfig] = field(
         default=None, metadata={"help": "configuration for token-level compression"}
     )
+    path: Optional[str] = field(
+        default=None, metadata={"help": "path to load the compressor from"}
+    )
+    remove_sep: bool = field(
+        default=False, metadata={"help": "remove separator before pooling"}
+    )
 
 
 class Compressor(nn.Module):
@@ -195,186 +220,208 @@ class Compressor(nn.Module):
         self.embed_dim = cfg.embed_dim
         self.blank_idx = blank_idx
         self.sep_idx = sep_idx
+        
+        self.remove_sep = False
+        if hasattr(self.cfg, "remove_sep") and self.cfg.remove_sep:
+            self.remove_sep = True
 
         assert cfg.char_compression is not None
-        self.char_pooling_module, self.char_post_adaptor = self._init_modules(cfg.char_compression)
+        self.char_pooling_module, self.char_post_adaptor, self.char_pre_transformer = self._init_modules(cfg.char_compression)
 
         if cfg.token_compression is not None:
-            self.token_pooling_module, self.token_post_adaptor = self._init_modules(cfg.token_compression)
+            self.token_pooling_module, self.token_post_adaptor, self.token_pre_transformer = self._init_modules(cfg.token_compression)
+        
+        if cfg.path is not None:
+            self._load_from_pretrained(cfg.path)
 
     def _init_modules(self, lvl_cfg):
 
         if lvl_cfg.pooling_fn == "attention":
             pooling_module = AttentionPooling(self.embed_dim, lvl_cfg.attn_hidden_dim, lvl_cfg.dropout)    
         elif lvl_cfg.pooling_fn == "cls":
-            pooling_module = CLSPooling(self.embed_dim, lvl_cfg.cls_transformer_layers, lvl_cfg.dropout) 
-        else: # mean or max
-            pooling_module = BasicPooling(lvl_cfg.pooling_fn, self.embed_dim, lvl_cfg.layernorm)
+            assert lvl_cfg.transformer_layers > 0
+            pooling_module = CLSPooling(self.embed_dim, lvl_cfg.transformer_layers, lvl_cfg.dropout, lvl_cfg.use_positional_embedding) 
+        else: # mean or max or mean-max
+            pooling_module = BasicPooling(lvl_cfg.pooling_fn, self.embed_dim, lvl_cfg.output_layer)
 
         post_adaptor = None
         if lvl_cfg.post_pooling_adaptor:
             post_adaptor = CompressionAdaptor(
                 self.embed_dim, lvl_cfg.adaptor_dim, lvl_cfg.dropout
             )
+            
+        pre_transformer = None
+        if lvl_cfg.transformer_layers > 0 and lvl_cfg.pooling_fn != "cls":
+            pre_transformer = TransformerEncoderLayers(self.embed_dim, lvl_cfg.transformer_layers, lvl_cfg.dropout)
 
-        return pooling_module, post_adaptor
+        return pooling_module, post_adaptor, pre_transformer
+        
+    def _load_module_state(self, module_name, compressor_ckpt):
+        if hasattr(self, module_name) and getattr(self, module_name) is not None:
+            ckpt_key = f"{module_name}_out" if "out" in module_name else module_name
+            if ckpt_key in compressor_ckpt and compressor_ckpt[ckpt_key] is not None:
+                getattr(self, module_name).load_state_dict(compressor_ckpt[ckpt_key])
+                logger.info(f"Loaded {module_name} from checkpoint")
+            else:
+                logger.warning(f"Could not load {module_name} from checkpoint")
 
-    def char_compression(self, x, preds):
+    def _load_from_pretrained(self, path):
+        logger.info(f"Loading compressor from {path}")
+        compressor_ckpt = torch.load(path)
+        # List of module names to load
+        module_names = [
+            "char_pooling_module.out",
+            "token_pooling_module.out",
+            "char_post_adaptor",
+            "token_post_adaptor",
+            "char_pre_transformer",
+            "token_pre_transformer",
+            "token_pooling_module",
+            "char_pooling_module"
+        ]
+        # Load each module
+        for module_name in module_names:
+            self._load_module_state(module_name, compressor_ckpt)
+            
+
+    def char_compression(self, x, preds, lens):
         # x: B x T x D
         # preds: B x T
-
-        B, T, D = x.size()
-        
-        # get the unique consecutive elements and their counts
-        counts_list = []
-        compr_preds = []
-        for i in range(B):
-            # p: compressed sequence, [N_i]
-            # c: repeating counts for each j element of p, [N_i]
-            p, c = preds[i].unique_consecutive(return_counts=True)
-            counts_list.append(c)
-            compr_preds.append(p)
-
-        counts = pad_sequence(counts_list, batch_first=True, padding_value=0)
-        compr_preds = pad_sequence(
-            compr_preds, batch_first=True, padding_value=self.blank_idx
-        )
-        valid_chars = compr_preds.ne(self.blank_idx)
-
-        # create a tensor to fill-in
-        n = counts.size(1) # max number of predictions for the sequences
-        m = counts[valid_chars].max().item() # max length of the non-blank predictions
-        x_chars = torch.zeros(B, n, m, D, device=x.device, dtype=x.dtype)
-
-        for i in range(B):
-            x_chars_i = torch.split(x[i], counts_list[i].tolist()) # Tuple[2d tensor]
-            x_chars_i = pad_sequence(
-                x_chars_i, batch_first=True, padding_value=0
-            )  # n_i x m_i x D
-            # we dont care about the length of the blank predictions
-            if x_chars_i.size(1) > m:
-                x_chars_i = x_chars_i[:, :m]
-            x_chars[i, :x_chars_i.size(0), :x_chars_i.size(1)] = x_chars_i
-
-        x_chars = x_chars.view(B * n, m, D)
-        counts = counts.view(B * n)
-        valid_chars = valid_chars.view(B * n)
-        
-        x_compr = torch.zeros(B * n, D, device=x.device, dtype=x.dtype)
-        x_compr[valid_chars] = self.char_pooling_module(
-            x_chars[valid_chars],
-            lengths_to_padding_mask(counts[valid_chars])
-        )  # B * n x D
-
-        x_compr = x_compr.view(B, n, D)  # B x n x D
-
-        compr_valid_mask = compr_preds != self.blank_idx  # B x n
-        compr_valid_lens = compr_valid_mask.sum(dim=-1)  # B
-        
-        # correction for completelly empty sequence
-        empty_examples = compr_valid_lens == 0
-        if empty_examples.any():
-            compr_valid_mask[empty_examples, 0] = True
-            compr_valid_lens[empty_examples] = 1
-            compr_preds[empty_examples, 0] = self.blank_idx
-
-        # remove blanks
-        x_compr = torch.split(
-            x_compr[compr_valid_mask], compr_valid_lens.tolist()
-        )  # Tuple[tensor] of size B
-        x_compr = pad_sequence(x_compr, batch_first=True, padding_value=0)  # B x N x D
-        compr_preds = torch.split(
-            compr_preds[compr_valid_mask], compr_valid_lens.tolist()
-        )  # Tuple[tensor] of size B
-        compr_preds = pad_sequence(
-            compr_preds, batch_first=True, padding_value=self.blank_idx
-        )  # B x N
-
-        mask = lengths_to_padding_mask(compr_valid_lens)  # B x N
-
-        if self.char_post_adaptor is not None:
-            x_compr = self.char_post_adaptor(x_compr)
-
-        return x_compr, mask, compr_valid_lens, compr_preds
-    
-    def token_compression(self, x, lens, preds):
-        # x: B x T x D
         # lens: B
-        # preds: B x T
-
-        sep_mask = preds.eq(self.sep_idx)  # B x T
-
-        B, T, D = x.size()
-        dev = x.device
-
-        # get token lengths
-        token_lengths_list = []
-        for i in range(B):
-            # Find the indices where the separators are present in the sentence
-            sep_indices = sep_mask[i].nonzero().squeeze(1)
-
-            # account for missing last separator
-            no_last_sep = preds[i, lens[i] - 1] != self.sep_idx
-            if no_last_sep:
-                sep_indices = torch.cat(
-                    [sep_indices, torch.tensor([lens[i]], device=dev)]
-                )
-
-            # account for consecutive separators
-            diffs = torch.diff(sep_indices, append=sep_indices[-1].unsqueeze(0) + 2)
-            transitions = diffs != 1
-            if transitions.any():
-                # Select only the first element of each set of consecutive numbers
-                sep_indices = sep_indices[transitions]
-
-            # Compute token lengths
-            sep_indices[: lens[i]] += 1
-            zero_tensor = torch.tensor([0], device=dev)
-            token_lengths = torch.diff(sep_indices, prepend=zero_tensor)
-            if no_last_sep:
-                token_lengths[-1] -= 1
-
-            token_lengths_list.append(token_lengths)
-
-        token_lengths = pad_sequence(
-            token_lengths_list, batch_first=True, padding_value=0
-        )
-
-        # create a tensor to fill-in
-        n = token_lengths.size(1)
-        m = token_lengths.max()
-        x_tokens = torch.zeros(B, n, m, D, device=x.device, dtype=x.dtype)
-
-        for i in range(B):
-            if lens[i] > 0:
-                x_tokens_i = torch.split(
-                    x[i, :lens[i]], token_lengths_list[i].tolist()
-                )  # Tuple[2d tensor]
-            x_tokens_i = pad_sequence(
-                x_tokens_i, batch_first=True, padding_value=0
-            )  # n_i x m_i x D
-            x_tokens[i, : x_tokens_i.size(0), : x_tokens_i.size(1)] = x_tokens_i
-
-        x_tokens = x_tokens.view(B * n, m, D)
-        token_lengths = token_lengths.view(B * n)
-        token_padding_mask = lengths_to_padding_mask(token_lengths)
-        valid_tokens = token_padding_mask.eq(0).any(dim=-1)
-
-        x_compr = torch.zeros(B * n, D, device=x.device, dtype=x.dtype)
-        x_compr[valid_tokens] = self.token_pooling_module(
-            x_tokens[valid_tokens],
-            lengths_to_padding_mask(token_lengths[valid_tokens])
-        )  # B * n x D
         
-        x_compr = x_compr.view(B, n, D)  # B x num_words x D
-        x_compr_lens = (token_lengths.view(B, -1) != 0).sum(dim=-1)  # B
-        x_compr_mask = lengths_to_padding_mask(x_compr_lens)  # B x num_words
-        x_compr.masked_fill_(x_compr_mask.unsqueeze(-1), 0)
+        B, T, D = x.size()
+        device = x.device
+        dtype = x.dtype
+        
+        # zero-out the padding
+        mask = lengths_to_padding_mask(lens) # B x T
+        x = x.masked_fill(mask.unsqueeze(-1), 0)
+        preds = preds.masked_fill(mask, self.blank_idx)
 
+        # add a vector of -1 to know where each example ends after flattening the batch
+        preds = torch.cat([-torch.ones(B, 1, device=device, dtype=torch.long), preds], dim=1).view(-1)
+        x = torch.cat([torch.zeros(B, 1, D, device=device, dtype=dtype), x], dim=1).view(-1, D)
+
+        # get points of consecutive preds
+        preds, counts = preds.unique_consecutive(return_counts=True)
+        
+        # split in representations of same chars
+        x = torch.split(x, counts.tolist())
+        
+        # remove blanks
+        valid_mask = preds != self.blank_idx
+        preds = preds[valid_mask]
+        counts = counts[valid_mask]
+        x = [x_i for x_i, v_i in zip(x, valid_mask) if v_i]
+        
+        # pack into tensor
+        x = pad_sequence(x, batch_first=True, padding_value=0)
+
+        # reduce dim 1
+        if self.char_pre_transformer is not None:
+            mask = lengths_to_padding_mask(counts)
+            x = self.char_pre_transformer(x, mask)
+        
+        x = self.char_pooling_module(x, counts)
+
+        # find split points for retrieving the examples
+        split_points = (preds == -1).nonzero(as_tuple=True)[0]
+        split_points = torch.cat([split_points, torch.tensor([len(preds)], device=device)])
+        split_points = (split_points[1:] - split_points[:-1]).tolist()
+
+        # split into examples
+        x = torch.split(x, split_points)
+        preds = torch.split(preds, split_points)
+        lens = torch.tensor([len(x_i) for x_i in x], device=device)
+
+        # pack into tensors
+        x = pad_sequence(x, batch_first=True, padding_value=0)
+        preds = pad_sequence(preds, batch_first=True, padding_value=self.blank_idx)
+
+        # remove the parts we add to identify the bounds for each example
+        x = x[:, 1:]
+        preds = preds[:, 1:]
+        lens -= 1
+
+        mask = lengths_to_padding_mask(lens)
+        
+        # account for empty examples (just a sep token)
+        empty_examples = lens == 0
+        num_empty_examples = empty_examples.sum()
+        if num_empty_examples > 0:
+            logger.warning(f"Found {num_empty_examples} empty examples")
+            mask[empty_examples, 0] = True
+            lens[empty_examples] = 1
+            preds[empty_examples, 0] = self.sep_idx
+
+        # process representation
+        if self.char_post_adaptor is not None:
+            x = self.char_post_adaptor(x)
+        
+        return x, mask, lens, preds, num_empty_examples
+    
+    def token_compression(self, x, preds, lens):
+        # x: B x T x D
+        # preds: B x T
+        # lens: B
+        
+        B, T, D = x.size()
+        device = x.device
+        dtype = x.dtype
+        
+        # new lengths after compression
+        new_lens = preds.eq(self.sep_idx).sum(dim=1)
+        
+        # unpad and unpack to list of tensors
+        preds = [preds[i, :lens[i]] for i in range(B)]
+        x = [x[i, :lens[i]] for i in range(B)]
+        
+        # make sure every example ends with a separator
+        num_examples_without_ending_sep = torch.tensor(0, device=device, dtype=torch.long)
+        for i in range(B):
+            if preds[i][-1] != self.sep_idx:
+                logger.warning(f"Example with length {lens[i]} and new length {new_lens[i]} ending with {preds[i][-1]}")
+                preds[i] = torch.cat([preds[i], torch.tensor([self.sep_idx], device=device, dtype=torch.long)])
+                x[i] = torch.cat([x[i], torch.zeros(1, D, device=device, dtype=dtype)])
+                new_lens[i] += 1
+                num_examples_without_ending_sep += 1
+        
+        # flatten
+        preds = torch.cat(preds)
+        x = torch.cat(x)
+        
+        # split points according to separators
+        split_points = preds.eq(self.sep_idx).nonzero(as_tuple=True)[0] + 1
+        split_points = torch.cat([torch.tensor([0], device=device, dtype=torch.long), split_points])
+        split_points = (split_points[1:] - split_points[:-1]).tolist()
+        
+        # re-arrange in 3d [total_num_tokens x max(count) x D]
+        x = torch.split(x, split_points) # Tuple[2d tensor]
+        if self.remove_sep:
+            x = [x_i[:-1] for x_i in x] # remove sep
+        counts = torch.tensor([len(x_i) for x_i in x], device=device, dtype=torch.long)
+        x = pad_sequence(x, batch_first=True, padding_value=0)
+        
+        if self.token_pre_transformer is not None:
+            mask = lengths_to_padding_mask(counts)
+            x = self.token_pre_transformer(x, mask)
+        
+        # reduce dim 1
+        x = self.token_pooling_module(x, counts)
+        
+        # reconstruct the batch
+        split_points = new_lens.cumsum(dim=0)
+        split_points = torch.cat([torch.tensor([0], device=device, dtype=torch.long), split_points])
+        split_points = (split_points[1:] - split_points[:-1]).tolist()
+        x = torch.split(x, split_points)
+        x = pad_sequence(x, batch_first=True, padding_value=0) # B x ? x D
+        
+        mask = lengths_to_padding_mask(new_lens)
+        
         if self.token_post_adaptor is not None:
-            x_compr = self.token_post_adaptor(x_compr)
-            
-        return x_compr, x_compr_mask, x_compr_lens
-            
+            x = self.token_post_adaptor(x)
+        
+        return x, mask, new_lens, num_examples_without_ending_sep  
+
     def forward(self, **kwargs):
         raise NotImplementedError("Use the compression method instead")

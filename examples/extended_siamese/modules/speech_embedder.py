@@ -21,9 +21,6 @@ class SpeechEmbedderConfig(FairseqDataclass):
     learned_positional_embedding: bool = field(
         default=False, metadata={"help": "use learned positional embedding"}
     )
-    scale_embedding: bool = field(
-        default=False, metadata={"help": "scale embeddings by sqrt(dimension)"}
-    )
     embed_dim: int = field(
         default=II("model.embed_dim"), metadata={"help": "embedding dimension"}
     )
@@ -38,6 +35,18 @@ class SpeechEmbedderConfig(FairseqDataclass):
     )
     freeze: bool = field(
         default=False, metadata={"help": "freeze speech embedder"}
+    )
+    scale_embedding: bool = field(
+        default=False, metadata={"help": "scale embeddings by sqrt(dimension)"}
+    )
+    learned_scale: bool = field(
+        default=False, metadata={"help": "learn the scale"}
+    )
+    inverse_scale: bool = field(
+        default=False, metadata={"help": "scale-down positional instead of scale-up embedding"}
+    )
+    scale_init: float = field(
+        default=32.0, metadata={"help": "scale initialization"}
     )
 
 
@@ -60,12 +69,10 @@ class SpeechEmbedder(nn.Module):
             )
             if cfg.learned_positional_embedding:
                 self.embedding_layernorm = LayerNorm(cfg.embed_dim)
-        self.scale = 1.0
-        if cfg.scale_embedding:
-            if cfg.layer_norm_special:
-                self.scale = 7.0
-            else:
-                self.scale = math.sqrt(cfg.embed_dim)
+        if cfg.scale_embedding and cfg.learned_scale:
+            self.scale = nn.Parameter(torch.tensor([cfg.scale_init]))
+        elif cfg.scale_embedding:
+            self.scale = cfg.scale_init
         
     def forward(self, x, padding_mask=None):
         """Add special embedding and positional embedding.
@@ -79,6 +86,9 @@ class SpeechEmbedder(nn.Module):
         B = x.size(0)
         lengths = get_lengths(x.transpose(0, 1), padding_mask)
         assert B == len(lengths)
+        
+        if padding_mask is not None:
+            x = x * (1 - padding_mask.unsqueeze(-1).type_as(x))
         
         if self.cfg.use_special_embedding:
             if hasattr(self, "layernorm_special"):
@@ -100,10 +110,11 @@ class SpeechEmbedder(nn.Module):
             
             padding_mask = lengths_to_padding_mask(lengths)
         
-        x *= self.scale
-        
         if self.cfg.use_positional_embedding:
-            x = x + self.pos_emb(padding_mask.long())
+            if self.cfg.inverse_scale:
+                x = x + self.pos_emb(padding_mask.long()) / self.scale
+            else:
+                x = x * self.scale + self.pos_emb(padding_mask.long())
             if hasattr(self, "embedding_layernorm"):
                 x = self.embedding_layernorm(x)
             

@@ -27,6 +27,10 @@ class ContextEncoderConfig(TransformerConfig):
         default=False,
         metadata={"help": "freeze context encoder"}
     )
+    finetune_ln_layers: bool = field(
+        default=False,
+        metadata={"help": "Even if freeze=True, finetune the layernorm layers"}
+    )
 
 class ContextEncoder(nn.Module):
     def __init__(self, cfg: ContextEncoderConfig, return_ln=False, no_final_layer_norm=False):
