@@ -178,11 +178,7 @@ class SiameseSpeechTextEncoders(FairseqEncoder):
         
     @classmethod
     def build_speech_encoder(cls, cfg: SpeechEncoderConfig):
-    
-        try:
-            ckpt = torch.load(cfg.path)
-        except:
-            ckpt = torch.load('/home/usuaris/scratch/ioannis.tsiamas/pretrained_models/wav2vec2/wav2vec_vox_960h_pl.pt')
+        ckpt = torch.load(cfg.path)
         
         if "args" in ckpt and ckpt["args"] is not None:
             w2v_model_config = convert_namespace_to_omegaconf(ckpt["args"]).model
@@ -219,13 +215,7 @@ class SiameseSpeechTextEncoders(FairseqEncoder):
         missing_keys, unexpected_keys = spch_encoder.load_state_dict(model_ckpt, strict=False)
         if missing_keys: logger.info(f"Missing keys in state dict (some may correspond to resetted parameters):\n\t" + '\n\t'.join(missing_keys))
         if unexpected_keys: logger.info(f"Unexpected keys in state dict:\n\t" + '\n\t'.join(unexpected_keys))
-        
-        # these were not supposed to be here
-        # so just putting zeros and freezing them
-        if "hubert" in cfg.path:
-            for l in range(7):
-                spch_encoder.w2v_model.feature_extractor.conv_layers[l][0].bias.requires_grad = False
-        
+
         spch_encoder.embed_dim = spch_encoder.w2v_model.cfg.encoder_embed_dim
         spch_encoder.w2v_model.encoder.ctc_layer_id = cfg.ctc_layer_id
 
@@ -233,14 +223,7 @@ class SiameseSpeechTextEncoders(FairseqEncoder):
 
     @classmethod
     def build_text_encoder(cls, cfg: TextEncoderConfig, src_dictionary):
-        
-        try:
-            ckpt = torch.load(cfg.path)
-        except:
-            if "1.3" in cfg.path:
-                ckpt = torch.load('/home/usuaris/scratch/ioannis.tsiamas/pretrained_models/nllb/nllb-200-distilled-1.3B.pt')
-            else:
-                ckpt = torch.load('/home/usuaris/scratch/ioannis.tsiamas/pretrained_models/nllb/nllb-200-distilled-600M.pt')
+        ckpt = torch.load(cfg.path)
         
         if ckpt["args"] is None:
             model_args = ckpt["cfg"]["model"]
@@ -514,7 +497,6 @@ class SiameseSpeechTextEncoders(FairseqEncoder):
                     logger.info(f"- freezing {name} {n}")
                     p.requires_grad = False
         
-        # TODO there are some more dropouts that need to be frozen *also masking
         if self.cfg.speech_encoder.freeze_layers > 0:
             logger.info(f"Freezing speech encoder layers ...")
             for i, layer in enumerate(self.spch_encoder.w2v_model.encoder.layers):

@@ -34,11 +34,7 @@ class CTCDecoderConfig(FairseqDataclass):
 
 class CTCDecoder(FairseqDecoder):
     def __init__(self, cfg: CTCDecoderConfig):
-        
-        try:
-            dictionary = Dictionary.load(cfg.dictionary_path)
-        except:
-            dictionary = Dictionary.load('/home/usuaris/scratch/ioannis.tsiamas/pretrained_models/wav2vec2/dict.ltr.txt')
+        dictionary = Dictionary.load(cfg.dictionary_path)
         # correct the ctc dictionary
         dictionary.symbols[0], dictionary.symbols[1] = dictionary.symbols[1], dictionary.symbols[0]
         dictionary.indices["<s>"], dictionary.indices["<pad>"] = 1, 0
