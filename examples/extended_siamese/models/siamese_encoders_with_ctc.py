@@ -4,6 +4,8 @@ import logging
 from dataclasses import dataclass, field
 from omegaconf import  OmegaConf, MISSING
 from typing import Optional
+import os
+from pathlib import Path
 
 import torch
 import torch.nn as nn
@@ -34,6 +36,8 @@ from examples.extended_siamese.modules import (
     CompressorConfig
 )
 
+MODELS_ROOT = Path(os.environ["MODELS_ROOT"])
+
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +46,20 @@ def _hasattr(obj, name):
         return hasattr(obj, name) and getattr(obj, name) is not None
     except:
         return False
+    
+def _model_path(path):
+    err_msg = f"Model not found at {path}. Make sure you have set up correctly the environment variable MODELS_ROOT and have the proper model files."
+    path = Path(path)
+    if not path.exists():
+        if "wav2vec" in str(path):
+            path = MODELS_ROOT / "wav2vec2" / path.name
+        elif "nllb" in str(path):
+            path = MODELS_ROOT / "nllb" / path.name
+        else:
+            raise FileNotFoundError(err_msg)
+        if not path.exists():
+            raise FileNotFoundError(err_msg)
+    return path
 
 
 class DummyDecoder(FairseqDecoder):
@@ -178,7 +196,7 @@ class SiameseSpeechTextEncoders(FairseqEncoder):
         
     @classmethod
     def build_speech_encoder(cls, cfg: SpeechEncoderConfig):
-        ckpt = torch.load(cfg.path)
+        ckpt = torch.load(_model_path(cfg.path))
         
         if "args" in ckpt and ckpt["args"] is not None:
             w2v_model_config = convert_namespace_to_omegaconf(ckpt["args"]).model
@@ -223,7 +241,7 @@ class SiameseSpeechTextEncoders(FairseqEncoder):
 
     @classmethod
     def build_text_encoder(cls, cfg: TextEncoderConfig, src_dictionary):
-        ckpt = torch.load(cfg.path)
+        ckpt = torch.load(_model_path(cfg.path))
         
         if ckpt["args"] is None:
             model_args = ckpt["cfg"]["model"]
@@ -568,6 +586,8 @@ class SiameseEncodersWithCTC(FairseqEncoderDecoderModel):
     @classmethod
     def build_model(cls, cfg, task):       
         encoder = cls.build_encoder(cfg, task.src_dict)
+        
+        cfg.ctc_decoder.dictionary_path = str(_model_path(cfg.ctc_decoder.dictionary_path))
         decoder = cls.build_decoder(cfg.ctc_decoder, encoder)
         
         # do it after initializing the decoder to transfer the ctc weights
