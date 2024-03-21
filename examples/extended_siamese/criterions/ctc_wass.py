@@ -272,7 +272,9 @@ class CtcWassersteinCriterion(CtcCriterion):
         if "inf_sep_loss" in extra:
             logging_output["inf_sep_loss"] = utils.item(extra["inf_sep_loss"].data)
         
-        if hasattr(model.encoder.speech_embedder, "scale") and not isinstance(model.encoder.speech_embedder.scale, float):
+        if hasattr(model.encoder, "speech_embedder") and \
+        hasattr(model.encoder.speech_embedder, "scale") and \
+        not isinstance(model.encoder.speech_embedder.scale, float):
             logging_output["emb_scale"] = utils.item(model.encoder.speech_embedder.scale.data)
         
         if self.calculate_ot:
